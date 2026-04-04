@@ -159,9 +159,13 @@ class MedicalDictationApp(ctk.CTk):
 
     def save_as(self):
         file_path = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-            initialfile="chart_note.txt",
+            defaultextension="",          # no extension auto-appended
+            filetypes=[
+                ("All files",  "*.*"),
+                ("Text files", "*.txt"),
+                ("Word docs",  "*.docx"),
+            ],
+            initialfile="chart_note",      # no .txt pre-filled
             title="Save Chart Note As"
         )
         if not file_path:
@@ -184,8 +188,6 @@ class MedicalDictationApp(ctk.CTk):
             subprocess.Popen(["xdg-open", folder])
 
     def open_terms_manager(self):
-        # Use plain tk.Toplevel — CTkToplevel has a Windows bug where it
-        # withdraws itself immediately after creation, causing the flash/close.
         TermsManagerWindow(self)
 
 
@@ -199,7 +201,7 @@ class TermsManagerWindow(tk.Toplevel):
         super().__init__(parent)
         self.title("Manage Medical Terms")
         self.geometry("700x520")
-        self.configure(bg="#2b2b2b")   # match dark theme
+        self.configure(bg="#2b2b2b")
         self.resizable(True, True)
         self.transient(parent)
         self.grab_set()
