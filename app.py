@@ -14,27 +14,26 @@ from dictation_engine import DictationEngine
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
-OUTPUT_DIR = "chart_notes"
+APP_NAME    = "VoxChart"
+OUTPUT_DIR  = "chart_notes"
 DEFAULT_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "chart_note.txt")
 
 # Fix Windows taskbar name — must be called before any Tk window is created.
-# Without this, Windows groups the window under python.exe and shows
-# "Python 3.x (64-bit)" in the taskbar right-click menu.
 if platform.system() == "Windows":
     try:
         from ctypes import windll
         windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "MedicalDictation.App.1.0"
+            "VoxChart.App.1.0"
         )
     except Exception:
         pass
 
 
-class MedicalDictationApp(ctk.CTk):
+class VoxChartApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Medical Dictation")
+        self.title(APP_NAME)
         self.geometry("900x650")
 
         # Set taskbar / window icon
@@ -212,12 +211,10 @@ class MedicalDictationApp(ctk.CTk):
 # ---------------- Medical Terms Manager Window ----------------
 
 class TermsManagerWindow(tk.Toplevel):
-    """Uses tk.Toplevel (not CTkToplevel) to avoid the Windows focus/close bug.
-    CTk widgets work fine inside a plain tk.Toplevel.
-    """
+    """Uses tk.Toplevel (not CTkToplevel) to avoid the Windows focus/close bug."""
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Manage Medical Terms")
+        self.title("VoxChart — Manage Medical Terms")
         self.geometry("700x520")
         self.configure(bg="#2b2b2b")
         self.resizable(True, True)
@@ -297,5 +294,5 @@ class TermsManagerWindow(tk.Toplevel):
 
 
 if __name__ == "__main__":
-    app = MedicalDictationApp()
+    app = VoxChartApp()
     app.mainloop()
