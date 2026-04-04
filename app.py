@@ -44,9 +44,50 @@ def _ensure_db():
     db_path = Path("medical_terms.db")
     if not db_path.exists():
         try:
-            import build_medical_db  # runs the builder silently
+            import build_medical_db
         except Exception:
-            pass  # DB will still be created on first Terms Manager open
+            pass
+
+
+def _check_microphone() -> bool:
+    """Return True if at least one input device is available."""
+    try:
+        import pyaudio
+        p = pyaudio.PyAudio()
+        found = any(
+            p.get_device_info_by_index(i).get("maxInputChannels", 0) > 0
+            for i in range(p.get_device_count())
+        )
+        p.terminate()
+        return found
+    except Exception:
+        return True  # If PyAudio itself fails, let DictationEngine surface the real error
+
+
+def _friendly_model_error(err: str) -> str:
+    """Return a user-friendly error message based on the exception text."""
+    e = err.lower()
+    if any(k in e for k in ("connection", "download", "network", "timeout", "urllib", "requests", "ssl")):
+        return (
+            "VoxChart could not download the AI model.\n\n"
+            "Please check your internet connection and try again.\n"
+            "If you are behind a firewall or proxy, contact your IT department."
+        )
+    if any(k in e for k in ("cuda", "gpu", "cudnn", "nccl")):
+        return (
+            f"GPU error encountered — falling back may help.\n\n"
+            f"Technical detail: {err}\n\n"
+            f"Device: {_DEVICE}  |  Compute: {_COMPUTE_TYPE}"
+        )
+    if any(k in e for k in ("memory", "oom", "out of memory")):
+        return (
+            "VoxChart ran out of memory loading the AI model.\n\n"
+            "Try closing other applications and restarting VoxChart."
+        )
+    return (
+        f"Failed to load AI model:\n\n{err}\n\n"
+        f"Device: {_DEVICE}  |  Compute: {_COMPUTE_TYPE}"
+    )
 
 
 # ---------------- First-Run Download Dialog ----------------
@@ -105,7 +146,6 @@ class VoxChartApp(ctk.CTk):
         self.is_recording = False
         self.output_file  = DEFAULT_OUTPUT_FILE
 
-        # Show first-run dialog while model loads in background
         self._first_run_dlg = None
         self._load_model_async()
 
@@ -113,7 +153,6 @@ class VoxChartApp(ctk.CTk):
         """Load the Whisper model on a background thread; show progress dialog."""
         import faster_whisper
         model_cache = Path.home() / ".cache" / "huggingface" / "hub"
-        # Check if model is already cached
         already_cached = any(model_cache.rglob(f"*{MODEL_SIZE}*")) if model_cache.exists() else False
 
         if not already_cached:
@@ -141,21 +180,25 @@ class VoxChartApp(ctk.CTk):
             self._first_run_dlg.destroy()
             self._first_run_dlg = None
         _ensure_db()
+
+        # Microphone check — warn but don't block; user may plug in later
+        if not _check_microphone():
+            messagebox.showwarning(
+                "No Microphone Found",
+                "VoxChart could not detect a microphone.\n\n"
+                "Please connect a microphone and restart the app before dictating."
+            )
+
         self._build_ui()
-        self.deiconify()  # show main window
+        self.deiconify()
 
     def _on_model_error(self, err: str):
         if self._first_run_dlg:
             self._first_run_dlg.destroy()
-        messagebox.showerror(
-            "VoxChart — Startup Error",
-            f"Failed to load AI model:\n\n{err}\n\n"
-            f"Device: {_DEVICE}  |  Compute: {_COMPUTE_TYPE}"
-        )
+        messagebox.showerror("VoxChart — Startup Error", _friendly_model_error(err))
         self.destroy()
 
     def _build_ui(self):
-        # Top bar
         top_frame = ctk.CTkFrame(self, corner_radius=0)
         top_frame.pack(fill="x", padx=10, pady=10)
 
@@ -176,7 +219,6 @@ class VoxChartApp(ctk.CTk):
         )
         theme_menu.pack(side="right", padx=10, pady=10)
 
-        # Main area
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -354,7 +396,6 @@ class TermsManagerWindow(tk.Toplevel):
         import sqlite3
         db_path = Path("medical_terms.db")
         if not db_path.exists():
-            # Auto-create if missing
             try:
                 import build_medical_db
             except Exception as e:

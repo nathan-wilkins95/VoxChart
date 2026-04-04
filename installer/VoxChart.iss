@@ -5,9 +5,9 @@ AppVersion=1.0.0
 AppPublisher=VoxChart
 DefaultDirName={autopf}\VoxChart
 DefaultGroupName=VoxChart
-OutputDir=output
+OutputDir=C:\medical_dictation_windows_final\installer\output
 OutputBaseFilename=VoxChart_Setup_v1.0.0
-SetupIconFile=C:\VoxChart\assets\icon.ico
+SetupIconFile=C:\medical_dictation_windows_final\assets\icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -21,15 +21,15 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"
 
 [Files]
-Source: "..\dist\VoxChart.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\medical_terms.db"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\assets\icon.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
+Source: "C:\medical_dictation_windows_final\dist\VoxChart.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\medical_dictation_windows_final\medical_terms.db";     DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\medical_dictation_windows_final\assets\icon.ico";      DestDir: "{app}\assets"; Flags: ignoreversion
 
 [Dirs]
 Name: "{app}\chart_notes"
 
 [Icons]
-Name: "{group}\VoxChart"; Filename: "{app}\VoxChart.exe"; WorkingDir: "{app}"
+Name: "{group}\VoxChart";      Filename: "{app}\VoxChart.exe"; WorkingDir: "{app}"
 Name: "{autodesktop}\VoxChart"; Filename: "{app}\VoxChart.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
