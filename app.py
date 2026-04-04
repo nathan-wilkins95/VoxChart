@@ -2,6 +2,7 @@ import os
 import sys
 import platform
 import subprocess
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from datetime import datetime
@@ -14,20 +15,80 @@ from dictation_engine import DictationEngine
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_NAME    = "VoxChart"
-OUTPUT_DIR  = "chart_notes"
+APP_NAME   = "VoxChart"
+APP_VER    = "1.0.0"
+OUTPUT_DIR = "chart_notes"
 DEFAULT_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "chart_note.txt")
+MODEL_SIZE = "large-v3-turbo"
+
+# Detect GPU — fall back to CPU gracefully
+try:
+    import torch
+    _DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
+    _COMPUTE_TYPE = "float16" if _DEVICE == "cuda" else "int8"
+except ImportError:
+    _DEVICE       = "cpu"
+    _COMPUTE_TYPE = "int8"
 
 # Fix Windows taskbar name — must be called before any Tk window is created.
 if platform.system() == "Windows":
     try:
         from ctypes import windll
-        windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "VoxChart.App.1.0"
-        )
+        windll.shell32.SetCurrentProcessExplicitAppUserModelID("VoxChart.App.1.0")
     except Exception:
         pass
 
+
+def _ensure_db():
+    """Create medical_terms.db automatically if it doesn't exist yet."""
+    db_path = Path("medical_terms.db")
+    if not db_path.exists():
+        try:
+            import build_medical_db  # runs the builder silently
+        except Exception:
+            pass  # DB will still be created on first Terms Manager open
+
+
+# ---------------- First-Run Download Dialog ----------------
+
+class FirstRunDialog(tk.Toplevel):
+    """Shown on first launch while the Whisper model downloads."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("VoxChart — First Run Setup")
+        self.geometry("460x200")
+        self.configure(bg="#1c1b19")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", lambda: None)  # prevent close
+
+        ctk.CTkLabel(
+            self,
+            text="Downloading AI Model (first run only)",
+            font=ctk.CTkFont(size=15, weight="bold")
+        ).pack(pady=(20, 6))
+
+        ctk.CTkLabel(
+            self,
+            text=f"Downloading {MODEL_SIZE} — this may take a few minutes.\nThe app will open automatically when ready.",
+            justify="center",
+            text_color="gray"
+        ).pack(pady=(0, 14))
+
+        self.progress = ctk.CTkProgressBar(self, width=380, mode="indeterminate")
+        self.progress.pack(pady=4)
+        self.progress.start()
+
+        self.status_label = ctk.CTkLabel(self, text="Connecting...", text_color="gray")
+        self.status_label.pack(pady=6)
+
+    def set_status(self, msg: str):
+        self.status_label.configure(text=msg)
+        self.update_idletasks()
+
+
+# ---------------- Main App ----------------
 
 class VoxChartApp(ctk.CTk):
     def __init__(self):
@@ -35,26 +96,63 @@ class VoxChartApp(ctk.CTk):
 
         self.title(APP_NAME)
         self.geometry("900x650")
+        self.withdraw()  # hide until model is ready
 
-        # Set taskbar / window icon
         icon_path = Path(__file__).parent / "assets" / "icon.ico"
         if icon_path.exists():
             self.iconbitmap(str(icon_path))
 
-        self.engine = DictationEngine(
-            model_size="large-v3-turbo",
-            device="cuda",
-            compute_type="float16",
-            output_dir=OUTPUT_DIR,
-            corpus_dir="training_corpus"
-        )
-        self.engine.on_text_callback = self.append_transcript
-        self.engine.on_status_callback = self.update_status
-
-        self.output_file = DEFAULT_OUTPUT_FILE
         self.is_recording = False
+        self.output_file  = DEFAULT_OUTPUT_FILE
 
+        # Show first-run dialog while model loads in background
+        self._first_run_dlg = None
+        self._load_model_async()
+
+    def _load_model_async(self):
+        """Load the Whisper model on a background thread; show progress dialog."""
+        import faster_whisper
+        model_cache = Path.home() / ".cache" / "huggingface" / "hub"
+        # Check if model is already cached
+        already_cached = any(model_cache.rglob(f"*{MODEL_SIZE}*")) if model_cache.exists() else False
+
+        if not already_cached:
+            self._first_run_dlg = FirstRunDialog(self)
+
+        def _do_load():
+            try:
+                self.engine = DictationEngine(
+                    model_size=MODEL_SIZE,
+                    device=_DEVICE,
+                    compute_type=_COMPUTE_TYPE,
+                    output_dir=OUTPUT_DIR,
+                    corpus_dir="training_corpus"
+                )
+                self.engine.on_text_callback   = self.append_transcript
+                self.engine.on_status_callback = self.update_status
+                self.after(0, self._on_model_ready)
+            except Exception as e:
+                self.after(0, lambda: self._on_model_error(str(e)))
+
+        threading.Thread(target=_do_load, daemon=True).start()
+
+    def _on_model_ready(self):
+        if self._first_run_dlg:
+            self._first_run_dlg.destroy()
+            self._first_run_dlg = None
+        _ensure_db()
         self._build_ui()
+        self.deiconify()  # show main window
+
+    def _on_model_error(self, err: str):
+        if self._first_run_dlg:
+            self._first_run_dlg.destroy()
+        messagebox.showerror(
+            "VoxChart — Startup Error",
+            f"Failed to load AI model:\n\n{err}\n\n"
+            f"Device: {_DEVICE}  |  Compute: {_COMPUTE_TYPE}"
+        )
+        self.destroy()
 
     def _build_ui(self):
         # Top bar
@@ -63,7 +161,7 @@ class VoxChartApp(ctk.CTk):
 
         self.status_label = ctk.CTkLabel(
             top_frame,
-            text="Status: Ready (model not loaded)",
+            text=f"Status: Ready  |  Device: {_DEVICE.upper()}",
             justify="left"
         )
         self.status_label.pack(side="left", padx=10, pady=10)
@@ -82,7 +180,6 @@ class VoxChartApp(ctk.CTk):
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Transcript area
         transcript_frame = ctk.CTkFrame(main_frame)
         transcript_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -99,7 +196,6 @@ class VoxChartApp(ctk.CTk):
         )
         self.transcript_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # Controls
         controls_frame = ctk.CTkFrame(main_frame)
         controls_frame.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -112,43 +208,39 @@ class VoxChartApp(ctk.CTk):
         )
         self.start_stop_button.pack(side="left", padx=10, pady=10)
 
-        self.save_as_button = ctk.CTkButton(
+        ctk.CTkButton(
             controls_frame,
             text="Save As...",
             command=self.save_as,
             height=40
-        )
-        self.save_as_button.pack(side="left", padx=10, pady=10)
+        ).pack(side="left", padx=10, pady=10)
 
-        self.terms_button = ctk.CTkButton(
+        ctk.CTkButton(
             controls_frame,
             text="Manage Medical Terms",
             command=self.open_terms_manager,
             height=40
-        )
-        self.terms_button.pack(side="left", padx=10, pady=10)
+        ).pack(side="left", padx=10, pady=10)
 
-        # Bottom info bar
         info_frame = ctk.CTkFrame(self)
         info_frame.pack(fill="x", padx=10, pady=(0, 10))
 
         ctk.CTkLabel(
             info_frame,
-            text=f"Output file: {os.path.abspath(self.output_file)}",
+            text=f"Output: {os.path.abspath(self.output_file)}",
             justify="left"
         ).pack(side="left", padx=10, pady=10)
 
-        self.open_folder_button = ctk.CTkButton(
+        ctk.CTkButton(
             info_frame,
             text="Open Output Folder",
             command=self.open_output_folder,
             width=140
-        )
-        self.open_folder_button.pack(side="right", padx=10, pady=10)
+        ).pack(side="right", padx=10, pady=10)
 
     # ---------------- Callbacks ----------------
 
-    def change_theme(self, choice: str):
+    def change_theme(self, choice):
         ctk.set_appearance_mode(choice)
 
     def toggle_dictation(self):
@@ -164,42 +256,38 @@ class VoxChartApp(ctk.CTk):
             self.transcript_text.insert("end", f"\n--- Session stopped {datetime.now().strftime('%H:%M:%S')} ---\n\n")
             self.is_recording = False
 
-    def append_transcript(self, text: str):
+    def append_transcript(self, text):
         self.after(0, lambda: self._safe_append(text))
 
-    def _safe_append(self, text: str):
+    def _safe_append(self, text):
         self.transcript_text.insert("end", text + "\n")
         self.transcript_text.see("end")
 
-    def update_status(self, msg: str):
-        self.after(0, lambda: self.status_label.configure(text=f"Status: {msg}"))
+    def update_status(self, msg):
+        self.after(0, lambda: self.status_label.configure(
+            text=f"Status: {msg}  |  Device: {_DEVICE.upper()}"
+        ))
 
     def save_as(self):
         file_path = filedialog.asksaveasfilename(
             defaultextension="",
-            filetypes=[
-                ("All files",  "*.*"),
-                ("Text files", "*.txt"),
-                ("Word docs",  "*.docx"),
-            ],
+            filetypes=[("All files", "*.*"), ("Text files", "*.txt"), ("Word docs", "*.docx")],
             initialfile="chart_note",
             title="Save Chart Note As"
         )
         if not file_path:
             return
         try:
-            content = self.transcript_text.get("1.0", "end-1c")
-            Path(file_path).write_text(content, encoding="utf-8")
+            Path(file_path).write_text(self.transcript_text.get("1.0", "end-1c"), encoding="utf-8")
             messagebox.showinfo("Saved", f"Chart note saved to:\n{file_path}")
         except Exception as e:
             messagebox.showerror("Error", f"Could not save file:\n{e}")
 
     def open_output_folder(self):
         folder = os.path.abspath(OUTPUT_DIR)
-        system = platform.system()
-        if system == "Windows":
+        if platform.system() == "Windows":
             os.startfile(folder)
-        elif system == "Darwin":
+        elif platform.system() == "Darwin":
             subprocess.Popen(["open", folder])
         else:
             subprocess.Popen(["xdg-open", folder])
@@ -208,10 +296,9 @@ class VoxChartApp(ctk.CTk):
         TermsManagerWindow(self)
 
 
-# ---------------- Medical Terms Manager Window ----------------
+# ---------------- Terms Manager Window ----------------
 
 class TermsManagerWindow(tk.Toplevel):
-    """Uses tk.Toplevel (not CTkToplevel) to avoid the Windows focus/close bug."""
     def __init__(self, parent):
         super().__init__(parent)
         self.title("VoxChart — Manage Medical Terms")
@@ -234,18 +321,15 @@ class TermsManagerWindow(tk.Toplevel):
         form_frame = ctk.CTkFrame(self)
         form_frame.pack(fill="x", padx=10, pady=10)
 
-        ctk.CTkLabel(form_frame, text="Correct Term (e.g., metformin)").grid(
-            row=0, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(form_frame, text="Correct Term (e.g., metformin)").grid(row=0, column=0, padx=10, pady=5, sticky="w")
         self.term_entry = ctk.CTkEntry(form_frame, width=300)
         self.term_entry.grid(row=0, column=1, padx=10, pady=5)
 
-        ctk.CTkLabel(form_frame, text="Common Misrecognition (e.g., met four min)").grid(
-            row=1, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(form_frame, text="Common Misrecognition (e.g., met four min)").grid(row=1, column=0, padx=10, pady=5, sticky="w")
         self.mis_entry = ctk.CTkEntry(form_frame, width=300)
         self.mis_entry.grid(row=1, column=1, padx=10, pady=5)
 
-        ctk.CTkLabel(form_frame, text="Category (medication/diagnosis/procedure)").grid(
-            row=2, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(form_frame, text="Category (medication/diagnosis/procedure)").grid(row=2, column=0, padx=10, pady=5, sticky="w")
         self.cat_entry = ctk.CTkEntry(form_frame, width=300)
         self.cat_entry.grid(row=2, column=1, padx=10, pady=5)
 
@@ -253,7 +337,7 @@ class TermsManagerWindow(tk.Toplevel):
 
         ctk.CTkLabel(
             self,
-            text="Tip: Run build_medical_db.py once to create the DB, then use this UI to add more terms.",
+            text="Terms are saved to medical_terms.db and used automatically during transcription.",
             justify="left",
             text_color="gray"
         ).pack(padx=10, pady=(0, 10))
@@ -270,10 +354,12 @@ class TermsManagerWindow(tk.Toplevel):
         import sqlite3
         db_path = Path("medical_terms.db")
         if not db_path.exists():
-            messagebox.showerror("DB Missing",
-                "Run build_medical_db.py first to create medical_terms.db",
-                parent=self)
-            return
+            # Auto-create if missing
+            try:
+                import build_medical_db
+            except Exception as e:
+                messagebox.showerror("DB Error", f"Could not create database:\n{e}", parent=self)
+                return
 
         conn = sqlite3.connect(str(db_path))
         cur  = conn.cursor()
