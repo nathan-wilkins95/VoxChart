@@ -1,41 +1,35 @@
+import os
+import sys
 import threading
 import queue
 import time
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-import torch
 from pathlib import Path
 from faster_whisper import WhisperModel
-from medical_postprocessor import correct_medical_text, format_as_soap_note
+from medical_postprocessor import correct_medical_text
 
 SAMPLE_RATE = 16000
-CHANNELS = 1
-CHUNK_SIZE = 4000
+CHANNELS    = 1
+CHUNK_SIZE  = 4000   # frames per read callback
+
 
 class DictationEngine:
     def __init__(
         self,
         model_size="large-v3-turbo",
-        device="auto",
-        compute_type="auto",
+        device="cuda",
+        compute_type="float16",
         output_dir="chart_notes",
         corpus_dir="training_corpus",
         medical_prompt=None
     ):
-        # Auto-detect GPU or fall back to CPU
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        # Set compute type based on device
-        if compute_type == "auto":
-            compute_type = "float16" if device == "cuda" else "int8"
-
-        self.model_size = model_size
-        self.device = device
+        self.model_size   = model_size
+        self.device       = device
         self.compute_type = compute_type
-        self.output_dir = Path(output_dir)
-        self.corpus_dir = Path(corpus_dir)
+        self.output_dir   = Path(output_dir)
+        self.corpus_dir   = Path(corpus_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
 
@@ -44,20 +38,20 @@ class DictationEngine:
             "Preserve drug names, dosages, and medical terminology exactly."
         )
 
-        self.model = None
-        self.audio_queue = queue.Queue()
-        self.stop_event = threading.Event()
+        self.model            = None
+        self.audio_queue      = queue.Queue()
+        self.stop_event       = threading.Event()
         self.transcribe_thread = None
-        self.stream = None
-        self.is_running = False
+        self.stream           = None
+        self.is_running       = False
 
-        self.on_text_callback = None
+        self.on_text_callback   = None
         self.on_status_callback = None
 
+    # ---- model ----
+
     def load_model(self):
-        if self.model is not None:
-            return
-        self._log_status(f"Loading model: {self.model_size} on {self.device} ({self.compute_type})...")
+        self._log_status(f"Loading model: {self.model_size} on {self.device}...")
         t0 = time.time()
         self.model = WhisperModel(
             self.model_size,
@@ -65,7 +59,9 @@ class DictationEngine:
             compute_type=self.compute_type,
             download_root=str(Path.home() / ".cache" / "whisper")
         )
-        self._log_status(f"Model ready [{self.device.upper()}] in {time.time() - t0:.1f}s")
+        self._log_status(f"Model loaded in {time.time() - t0:.1f}s")
+
+    # ---- internal helpers ----
 
     def _log_status(self, msg: str):
         if self.on_status_callback:
@@ -75,17 +71,23 @@ class DictationEngine:
         if self.on_text_callback:
             self.on_text_callback(text)
 
+    # ---- audio (sounddevice callback — works on Windows, Linux, macOS) ----
+
     def _sd_callback(self, indata, frames, time_info, status):
+        """Called by sounddevice on each audio block."""
         if status:
             self._log_status(f"Audio warning: {status}")
+        # indata is float32 in [-1, 1]; convert to int16 bytes for queue
         pcm = (indata[:, 0] * 32767).astype(np.int16).tobytes()
         self.audio_queue.put(pcm)
 
+    # ---- transcription loop ----
+
     def _transcribe_loop(self, output_file: str):
-        audio_buffer = []
+        audio_buffer   = []
         buffer_duration = 0.0
         last_flush_time = time.time()
-        BUFFER_SECONDS = 15
+        BUFFER_SECONDS  = 15
 
         with open(output_file, "a", encoding="utf-8") as f:
             while not self.stop_event.is_set() or not self.audio_queue.empty():
@@ -104,8 +106,8 @@ class DictationEngine:
                 if not flush_ready:
                     continue
 
-                raw = b"".join(audio_buffer)
-                audio_array = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                raw          = b"".join(audio_buffer)
+                audio_array  = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
                 audio_buffer = []
                 buffer_duration = 0.0
                 last_flush_time = time.time()
@@ -131,19 +133,23 @@ class DictationEngine:
                 ]
 
                 if text_parts:
-                    raw_text = " ".join(text_parts)
+                    raw_text       = " ".join(text_parts)
                     corrected_text = correct_medical_text(raw_text)
-		    corrected_text = format_as_soap_note(corrected_text)
-                    f.write(formatted_text + "\n")
+                    f.write(corrected_text + "\n")
                     f.flush()
-                    self._emit_text(formatted_text)
+                    self._emit_text(corrected_text)
 
+                    # Save training pair
                     import hashlib
                     from datetime import datetime
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    hid = hashlib.sha256(corrected_text.encode()).hexdigest()[:8]
+                    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    hid  = hashlib.sha256(corrected_text.encode()).hexdigest()[:8]
                     sf.write(str(self.corpus_dir / f"{ts}_{hid}.wav"), audio_array, SAMPLE_RATE)
-                    (self.corpus_dir / f"{ts}_{hid}.txt").write_text(corrected_text + "\n", encoding="utf-8")
+                    (self.corpus_dir / f"{ts}_{hid}.txt").write_text(
+                        corrected_text + "\n", encoding="utf-8"
+                    )
+
+    # ---- public API ----
 
     def start(self, output_file: str):
         if self.is_running:
@@ -152,9 +158,10 @@ class DictationEngine:
             self.load_model()
 
         self.stop_event.clear()
-        self.audio_queue = queue.Queue()
-        self.is_running = True
+        self.audio_queue  = queue.Queue()
+        self.is_running   = True
 
+        # Open sounddevice InputStream (works on Windows / Linux / macOS)
         self.stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=CHANNELS,

@@ -1,6 +1,5 @@
 import os
 import sys
-import threading
 import platform
 import subprocess
 import tkinter as tk
@@ -27,20 +26,17 @@ class MedicalDictationApp(ctk.CTk):
 
         self.engine = DictationEngine(
             model_size="large-v3-turbo",
-            device="auto",
-            compute_type="auto",
+            device="cuda",
+            compute_type="float16",
             output_dir=OUTPUT_DIR,
             corpus_dir="training_corpus"
         )
-
         self.engine.on_text_callback = self.append_transcript
         self.engine.on_status_callback = self.update_status
 
         self.output_file = DEFAULT_OUTPUT_FILE
         self.is_recording = False
-        self.model_loading = True
 
-        threading.Thread(target=self.engine.load_model, daemon=True).start()
         self._build_ui()
 
     def _build_ui(self):
@@ -50,7 +46,7 @@ class MedicalDictationApp(ctk.CTk):
 
         self.status_label = ctk.CTkLabel(
             top_frame,
-            text="Status: Loading model...",
+            text="Status: Ready (model not loaded)",
             justify="left"
         )
         self.status_label.pack(side="left", padx=10, pady=10)
@@ -65,7 +61,7 @@ class MedicalDictationApp(ctk.CTk):
         )
         theme_menu.pack(side="right", padx=10, pady=10)
 
-        # Main area
+        # Main area: transcript + controls
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -115,7 +111,7 @@ class MedicalDictationApp(ctk.CTk):
         )
         self.terms_button.pack(side="left", padx=10, pady=10)
 
-        # Bottom info bar
+        # Bottom: output file info
         info_frame = ctk.CTkFrame(self)
         info_frame.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -140,9 +136,6 @@ class MedicalDictationApp(ctk.CTk):
 
     def toggle_dictation(self):
         if not self.is_recording:
-            if self.engine.model is None:
-                messagebox.showinfo("Please wait", "Model is still loading, try again in a moment.")
-                return
             Path(self.output_file).parent.mkdir(parents=True, exist_ok=True)
             self.start_stop_button.configure(text="Stop Dictation", fg_color="#d93025")
             self.transcript_text.insert("end", f"\n--- Session started {datetime.now().strftime('%H:%M:%S')} ---\n")
@@ -236,8 +229,8 @@ class TermsManagerWindow(ctk.CTkToplevel):
 
     def add_term(self):
         term = self.term_entry.get().strip()
-        mis = self.mis_entry.get().strip()
-        cat = self.cat_entry.get().strip()
+        mis  = self.mis_entry.get().strip()
+        cat  = self.cat_entry.get().strip()
 
         if not term:
             messagebox.showwarning("Missing Field", "Correct Term is required.")
@@ -250,7 +243,7 @@ class TermsManagerWindow(ctk.CTkToplevel):
             return
 
         conn = sqlite3.connect(str(db_path))
-        cur = conn.cursor()
+        cur  = conn.cursor()
         try:
             cur.execute(
                 "INSERT INTO terms (term, category, common_misrecognition) VALUES (?, ?, ?)",
