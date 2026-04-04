@@ -61,7 +61,7 @@ class MedicalDictationApp(ctk.CTk):
         )
         theme_menu.pack(side="right", padx=10, pady=10)
 
-        # Main area: transcript + controls
+        # Main area
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -111,7 +111,7 @@ class MedicalDictationApp(ctk.CTk):
         )
         self.terms_button.pack(side="left", padx=10, pady=10)
 
-        # Bottom: output file info
+        # Bottom info bar
         info_frame = ctk.CTkFrame(self)
         info_frame.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -184,27 +184,28 @@ class MedicalDictationApp(ctk.CTk):
             subprocess.Popen(["xdg-open", folder])
 
     def open_terms_manager(self):
-        win = TermsManagerWindow(self)
-        win.grab_set()   # keep focus on this window
-        win.lift()       # bring to front
-        win.focus_force()
+        # Use plain tk.Toplevel — CTkToplevel has a Windows bug where it
+        # withdraws itself immediately after creation, causing the flash/close.
+        TermsManagerWindow(self)
 
 
 # ---------------- Medical Terms Manager Window ----------------
 
-class TermsManagerWindow(ctk.CTkToplevel):
+class TermsManagerWindow(tk.Toplevel):
+    """Uses tk.Toplevel (not CTkToplevel) to avoid the Windows focus/close bug.
+    CTk widgets work fine inside a plain tk.Toplevel.
+    """
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Manage Medical Terms")
-        self.geometry("700x500")
-        self.transient(parent)   # tie lifetime to parent without hiding parent
-        self.after(100, self._focus_fix)  # CTkToplevel needs a brief delay on Windows
-        self._build_ui()
-
-    def _focus_fix(self):
-        """Workaround: CTkToplevel on Windows loses focus in the first few frames."""
+        self.geometry("700x520")
+        self.configure(bg="#2b2b2b")   # match dark theme
+        self.resizable(True, True)
+        self.transient(parent)
+        self.grab_set()
         self.lift()
         self.focus_force()
+        self._build_ui()
 
     def _build_ui(self):
         ctk.CTkLabel(
@@ -216,15 +217,18 @@ class TermsManagerWindow(ctk.CTkToplevel):
         form_frame = ctk.CTkFrame(self)
         form_frame.pack(fill="x", padx=10, pady=10)
 
-        ctk.CTkLabel(form_frame, text="Correct Term (e.g., metformin)").grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(form_frame, text="Correct Term (e.g., metformin)").grid(
+            row=0, column=0, padx=10, pady=5, sticky="w")
         self.term_entry = ctk.CTkEntry(form_frame, width=300)
         self.term_entry.grid(row=0, column=1, padx=10, pady=5)
 
-        ctk.CTkLabel(form_frame, text="Common Misrecognition (e.g., met four min)").grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(form_frame, text="Common Misrecognition (e.g., met four min)").grid(
+            row=1, column=0, padx=10, pady=5, sticky="w")
         self.mis_entry = ctk.CTkEntry(form_frame, width=300)
         self.mis_entry.grid(row=1, column=1, padx=10, pady=5)
 
-        ctk.CTkLabel(form_frame, text="Category (medication/diagnosis/procedure)").grid(row=2, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(form_frame, text="Category (medication/diagnosis/procedure)").grid(
+            row=2, column=0, padx=10, pady=5, sticky="w")
         self.cat_entry = ctk.CTkEntry(form_frame, width=300)
         self.cat_entry.grid(row=2, column=1, padx=10, pady=5)
 
@@ -243,13 +247,15 @@ class TermsManagerWindow(ctk.CTkToplevel):
         cat  = self.cat_entry.get().strip()
 
         if not term:
-            messagebox.showwarning("Missing Field", "Correct Term is required.")
+            messagebox.showwarning("Missing Field", "Correct Term is required.", parent=self)
             return
 
         import sqlite3
         db_path = Path("medical_terms.db")
         if not db_path.exists():
-            messagebox.showerror("DB Missing", "Run build_medical_db.py first to create medical_terms.db")
+            messagebox.showerror("DB Missing",
+                "Run build_medical_db.py first to create medical_terms.db",
+                parent=self)
             return
 
         conn = sqlite3.connect(str(db_path))
@@ -260,12 +266,12 @@ class TermsManagerWindow(ctk.CTkToplevel):
                 (term.lower(), cat or None, mis.lower() if mis else None)
             )
             conn.commit()
-            messagebox.showinfo("Success", f"Added term: {term}")
+            messagebox.showinfo("Success", f"Added term: {term}", parent=self)
             self.term_entry.delete(0, "end")
             self.mis_entry.delete(0, "end")
             self.cat_entry.delete(0, "end")
         except sqlite3.IntegrityError:
-            messagebox.showwarning("Duplicate", "This term already exists.")
+            messagebox.showwarning("Duplicate", "This term already exists.", parent=self)
         finally:
             conn.close()
 
