@@ -1,0 +1,26 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+
+# PyInstaller
+dist/
+build/
+*.spec
+
+# App data
+chart_notes/
+training_corpus/
+medical_terms.db
+
+# Installer build
+installer_build/
+
+# Model cache
+.cache/
+*.bin
+*.pt
