@@ -5,7 +5,7 @@
 ; Before compiling:
 ;   1. pyinstaller --onefile --windowed --icon=assets\icon.ico --name="VoxChart" app.py
 ;   2. python build_medical_db.py   (generates medical_terms.db)
-;   3. Open this .iss file in Inno Setup and click Build > Compile
+;   3. Run: ISCC.exe installer\VoxChart.iss
 ; ---------------------------------------------------------------
 
 #define MyAppName      "VoxChart"
@@ -25,7 +25,6 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-LicenseFile=
 OutputDir=installer\output
 OutputBaseFilename=VoxChart_Setup_v{#MyAppVersion}
 SetupIconFile=assets\icon.ico
@@ -43,33 +42,23 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"; Flags: checked
-Name: "startmenuicon"; Description: "Create a &Start Menu shortcut"; GroupDescription: "Additional icons:"; Flags: checked
 
 [Files]
-; Main executable (built by PyInstaller)
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-
-; Pre-built medical terms database
-Source: "medical_terms.db"; DestDir: "{app}"; Flags: ignoreversion
-
-; App icon
-Source: "assets\icon.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
-
-; Training corpus folder (if present)
-Source: "training_corpus\*"; DestDir: "{app}\training_corpus"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: DirExists(ExpandConstant('{src}\training_corpus'))
+Source: "medical_terms.db";     DestDir: "{app}"; Flags: ignoreversion
+Source: "assets\icon.ico";      DestDir: "{app}\assets"; Flags: ignoreversion
 
 [Dirs]
-; Create chart_notes output folder on install
 Name: "{app}\chart_notes"
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\icon.ico"; WorkingDir: "{app}"
+Name: "{group}\{#MyAppName}";          Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\icon.ico"; WorkingDir: "{app}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\icon.ico"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}";    Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\icon.ico"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\chart_notes"
-Type: files; Name: "{app}\medical_terms.db"
+Type: files;          Name: "{app}\medical_terms.db"
