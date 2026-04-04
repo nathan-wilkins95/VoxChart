@@ -27,8 +27,8 @@ class MedicalDictationApp(ctk.CTk):
 
         self.engine = DictationEngine(
             model_size="large-v3-turbo",
-            device="cuda",
-            compute_type="float16",
+            device="auto",
+            compute_type="auto",
             output_dir=OUTPUT_DIR,
             corpus_dir="training_corpus"
         )
@@ -50,7 +50,7 @@ class MedicalDictationApp(ctk.CTk):
 
         self.status_label = ctk.CTkLabel(
             top_frame,
-            text="Status: Ready (model not loaded)",
+            text="Status: Loading model...",
             justify="left"
         )
         self.status_label.pack(side="left", padx=10, pady=10)
@@ -65,7 +65,7 @@ class MedicalDictationApp(ctk.CTk):
         )
         theme_menu.pack(side="right", padx=10, pady=10)
 
-        # Main area: transcript + controls
+        # Main area
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -115,7 +115,7 @@ class MedicalDictationApp(ctk.CTk):
         )
         self.terms_button.pack(side="left", padx=10, pady=10)
 
-        # Bottom: output file info
+        # Bottom info bar
         info_frame = ctk.CTkFrame(self)
         info_frame.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -141,7 +141,7 @@ class MedicalDictationApp(ctk.CTk):
     def toggle_dictation(self):
         if not self.is_recording:
             if self.engine.model is None:
-                messagebox.showinfo("Please wait", "Model is still loading.")
+                messagebox.showinfo("Please wait", "Model is still loading, try again in a moment.")
                 return
             Path(self.output_file).parent.mkdir(parents=True, exist_ok=True)
             self.start_stop_button.configure(text="Stop Dictation", fg_color="#d93025")
@@ -192,6 +192,7 @@ class MedicalDictationApp(ctk.CTk):
 
     def open_terms_manager(self):
         TermsManagerWindow(self)
+
 
 # ---------------- Medical Terms Manager Window ----------------
 
@@ -264,6 +265,7 @@ class TermsManagerWindow(ctk.CTkToplevel):
             messagebox.showwarning("Duplicate", "This term already exists.")
         finally:
             conn.close()
+
 
 if __name__ == "__main__":
     app = MedicalDictationApp()

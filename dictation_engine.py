@@ -4,6 +4,7 @@ import time
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
+import torch
 from pathlib import Path
 from faster_whisper import WhisperModel
 from medical_postprocessor import correct_medical_text
@@ -16,12 +17,20 @@ class DictationEngine:
     def __init__(
         self,
         model_size="large-v3-turbo",
-        device="cuda",
-        compute_type="float16",
+        device="auto",
+        compute_type="auto",
         output_dir="chart_notes",
         corpus_dir="training_corpus",
         medical_prompt=None
     ):
+        # Auto-detect GPU or fall back to CPU
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # Set compute type based on device
+        if compute_type == "auto":
+            compute_type = "float16" if device == "cuda" else "int8"
+
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
@@ -48,7 +57,7 @@ class DictationEngine:
     def load_model(self):
         if self.model is not None:
             return
-        self._log_status(f"Loading model: {self.model_size} on {self.device}...")
+        self._log_status(f"Loading model: {self.model_size} on {self.device} ({self.compute_type})...")
         t0 = time.time()
         self.model = WhisperModel(
             self.model_size,
@@ -56,7 +65,7 @@ class DictationEngine:
             compute_type=self.compute_type,
             download_root=str(Path.home() / ".cache" / "whisper")
         )
-        self._log_status(f"Model loaded in {time.time() - t0:.1f}s")
+        self._log_status(f"Model ready [{self.device.upper()}] in {time.time() - t0:.1f}s")
 
     def _log_status(self, msg: str):
         if self.on_status_callback:
