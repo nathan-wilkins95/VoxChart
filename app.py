@@ -191,7 +191,10 @@ class MedicalDictationApp(ctk.CTk):
             subprocess.Popen(["xdg-open", folder])
 
     def open_terms_manager(self):
-        TermsManagerWindow(self)
+        win = TermsManagerWindow(self)
+        win.grab_set()   # keep focus on this window
+        win.lift()       # bring to front
+        win.focus_force()
 
 
 # ---------------- Medical Terms Manager Window ----------------
@@ -201,7 +204,14 @@ class TermsManagerWindow(ctk.CTkToplevel):
         super().__init__(parent)
         self.title("Manage Medical Terms")
         self.geometry("700x500")
+        self.transient(parent)   # tie lifetime to parent without hiding parent
+        self.after(100, self._focus_fix)  # CTkToplevel needs a brief delay on Windows
         self._build_ui()
+
+    def _focus_fix(self):
+        """Workaround: CTkToplevel on Windows loses focus in the first few frames."""
+        self.lift()
+        self.focus_force()
 
     def _build_ui(self):
         ctk.CTkLabel(
