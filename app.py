@@ -17,12 +17,30 @@ ctk.set_default_color_theme("dark-blue")
 OUTPUT_DIR = "chart_notes"
 DEFAULT_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "chart_note.txt")
 
+# Fix Windows taskbar name — must be called before any Tk window is created.
+# Without this, Windows groups the window under python.exe and shows
+# "Python 3.x (64-bit)" in the taskbar right-click menu.
+if platform.system() == "Windows":
+    try:
+        from ctypes import windll
+        windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "MedicalDictation.App.1.0"
+        )
+    except Exception:
+        pass
+
+
 class MedicalDictationApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Medical Dictation (Offline AI)")
+        self.title("Medical Dictation")
         self.geometry("900x650")
+
+        # Set taskbar / window icon
+        icon_path = Path(__file__).parent / "assets" / "icon.ico"
+        if icon_path.exists():
+            self.iconbitmap(str(icon_path))
 
         self.engine = DictationEngine(
             model_size="large-v3-turbo",
@@ -159,13 +177,13 @@ class MedicalDictationApp(ctk.CTk):
 
     def save_as(self):
         file_path = filedialog.asksaveasfilename(
-            defaultextension="",          # no extension auto-appended
+            defaultextension="",
             filetypes=[
                 ("All files",  "*.*"),
                 ("Text files", "*.txt"),
                 ("Word docs",  "*.docx"),
             ],
-            initialfile="chart_note",      # no .txt pre-filled
+            initialfile="chart_note",
             title="Save Chart Note As"
         )
         if not file_path:
