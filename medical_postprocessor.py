@@ -28,3 +28,27 @@ def correct_medical_text(text: str) -> str:
         if mis in text_lower:
             text = re.sub(re.escape(mis), correct, text, flags=re.IGNORECASE)
     return text
+from datetime import datetime
+
+def format_as_soap_note(raw_text: str, patient_name: str = "", date: str = "") -> str:
+    date = date or datetime.now().strftime("%m/%d/%Y %H:%M")
+
+    return f"""DATE: {date}
+PATIENT: {patient_name or "_______________"}
+PROVIDER: _______________
+
+SUBJECTIVE:
+{raw_text}
+
+OBJECTIVE:
+Vitals: _______________
+Exam: _______________
+
+ASSESSMENT:
+_______________
+
+PLAN:
+_______________
+
+Electronically signed: _______________
+"""

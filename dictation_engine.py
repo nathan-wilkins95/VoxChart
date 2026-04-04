@@ -7,7 +7,7 @@ import soundfile as sf
 import torch
 from pathlib import Path
 from faster_whisper import WhisperModel
-from medical_postprocessor import correct_medical_text
+from medical_postprocessor import correct_medical_text, format_as_soap_note
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -133,9 +133,10 @@ class DictationEngine:
                 if text_parts:
                     raw_text = " ".join(text_parts)
                     corrected_text = correct_medical_text(raw_text)
-                    f.write(corrected_text + "\n")
+		    corrected_text = format_as_soap_note(corrected_text)
+                    f.write(formatted_text + "\n")
                     f.flush()
-                    self._emit_text(corrected_text)
+                    self._emit_text(formatted_text)
 
                     import hashlib
                     from datetime import datetime
