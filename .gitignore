@@ -24,3 +24,5 @@ installer_build/
 .cache/
 *.bin
 *.pt
+
+installer/output/*.exe
