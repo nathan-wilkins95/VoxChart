@@ -1,22 +1,322 @@
 import os
 import sys
+import json
 import platform
 import subprocess
 import threading
-import tkinter as tk
 from tkinter import filedialog, messagebox
 from datetime import datetime
 from pathlib import Path
+
 import customtkinter as ctk
 from dictation_engine import DictationEngine
 
 ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+ctk.set_default_color_theme("dark-blue")
 
 OUTPUT_DIR = "chart_notes"
 DEFAULT_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "chart_note.txt")
 APP_VERSION = "1.0.0"
+CONFIG_FILE = Path("voxchart_config.json")
 
+
+def load_config():
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_config(cfg: dict):
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def detect_gpu():
+    try:
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0)
+            return True, name
+    except Exception:
+        pass
+    return False, None
+
+
+# ──────────────────────────────────────────────
+#  First-Run Onboarding Wizard
+# ──────────────────────────────────────────────
+
+class OnboardingWizard(ctk.CTkToplevel):
+    """
+    3-step wizard shown only on first launch.
+    Saves choices to voxchart_config.json.
+    """
+
+    def __init__(self, parent, on_complete):
+        super().__init__(parent)
+        self.title("VoxChart Setup")
+        self.geometry("560x480")
+        self.resizable(False, False)
+        self.grab_set()  # modal
+        self.on_complete = on_complete
+
+        self.step = 0
+        self.gpu_available, self.gpu_name = detect_gpu()
+
+        # wizard state
+        self.chosen_device = ctk.StringVar(value="cuda" if self.gpu_available else "cpu")
+        self.chosen_mic_idx = ctk.IntVar(value=0)
+        self.chosen_mic_name = ctk.StringVar(value="")
+
+        self.frames = []
+        self._build_steps()
+        self._show_step(0)
+
+    # ── build all 3 step frames ──────────────────
+
+    def _build_steps(self):
+        self.frames = [
+            self._build_welcome(),
+            self._build_device_step(),
+            self._build_mic_step(),
+        ]
+
+    def _build_welcome(self):
+        f = ctk.CTkFrame(self, fg_color="transparent")
+
+        ctk.CTkLabel(
+            f,
+            text="Welcome to VoxChart",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(pady=(40, 10))
+
+        ctk.CTkLabel(
+            f,
+            text=(
+                "VoxChart turns your voice into structured medical chart notes\n"
+                "using a fully offline AI — no internet required after setup.\n\n"
+                "This wizard will configure your microphone and compute device.\n"
+                "It only runs once."
+            ),
+            font=ctk.CTkFont(size=13),
+            justify="center",
+        ).pack(pady=10, padx=30)
+
+        ctk.CTkLabel(
+            f,
+            text="Click Next to begin  →",
+            font=ctk.CTkFont(size=12),
+            text_color="gray",
+        ).pack(pady=(20, 0))
+
+        self._nav_buttons(f, back=False)
+        return f
+
+    def _build_device_step(self):
+        f = ctk.CTkFrame(self, fg_color="transparent")
+
+        ctk.CTkLabel(
+            f,
+            text="Step 1 of 2 — Compute Device",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(pady=(30, 10))
+
+        if self.gpu_available:
+            gpu_label = f"✅  GPU detected: {self.gpu_name}"
+            gpu_color = "green"
+            rec_text = "GPU recommended — faster transcription."
+        else:
+            gpu_label = "⚠️  No NVIDIA GPU detected"
+            gpu_color = "orange"
+            rec_text = "CPU mode will be used. Transcription may be slower."
+
+        ctk.CTkLabel(
+            f, text=gpu_label, font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=gpu_color,
+        ).pack(pady=(10, 4))
+
+        ctk.CTkLabel(
+            f, text=rec_text, font=ctk.CTkFont(size=12), text_color="gray",
+        ).pack(pady=(0, 20))
+
+        ctk.CTkLabel(f, text="Select compute device:", font=ctk.CTkFont(size=13)).pack()
+
+        btn_frame = ctk.CTkFrame(f, fg_color="transparent")
+        btn_frame.pack(pady=10)
+
+        ctk.CTkRadioButton(
+            btn_frame,
+            text="GPU (CUDA)  — fast, requires NVIDIA GPU",
+            variable=self.chosen_device,
+            value="cuda",
+            state="normal" if self.gpu_available else "disabled",
+        ).pack(anchor="w", padx=20, pady=6)
+
+        ctk.CTkRadioButton(
+            btn_frame,
+            text="CPU  — works on any machine, slower",
+            variable=self.chosen_device,
+            value="cpu",
+        ).pack(anchor="w", padx=20, pady=6)
+
+        if not self.gpu_available:
+            self.chosen_device.set("cpu")
+
+        self._nav_buttons(f)
+        return f
+
+    def _build_mic_step(self):
+        f = ctk.CTkFrame(self, fg_color="transparent")
+
+        ctk.CTkLabel(
+            f,
+            text="Step 2 of 2 — Microphone",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(pady=(30, 10))
+
+        ctk.CTkLabel(
+            f,
+            text="Select the microphone you will use for dictation.",
+            font=ctk.CTkFont(size=13),
+        ).pack(pady=(0, 10))
+
+        self.wizard_mic_var = ctk.StringVar()
+        self.wizard_mic_menu = ctk.CTkOptionMenu(
+            f, variable=self.wizard_mic_var, width=380
+        )
+        self.wizard_mic_menu.pack(pady=6)
+
+        btn_row = ctk.CTkFrame(f, fg_color="transparent")
+        btn_row.pack(pady=6)
+
+        ctk.CTkButton(
+            btn_row, text="Refresh", command=self._refresh_wizard_mics, width=90
+        ).pack(side="left", padx=6)
+
+        self.wizard_test_btn = ctk.CTkButton(
+            btn_row, text="Test Mic", command=self._test_wizard_mic, width=90
+        )
+        self.wizard_test_btn.pack(side="left", padx=6)
+
+        self.wizard_level_label = ctk.CTkLabel(
+            f, text="Level: --", font=ctk.CTkFont(size=12), text_color="gray"
+        )
+        self.wizard_level_label.pack(pady=4)
+
+        self._refresh_wizard_mics()
+        self._nav_buttons(f, next_text="Finish ✓")
+        return f
+
+    # ── helpers ─────────────────────────────────
+
+    def _refresh_wizard_mics(self):
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+            opts = [
+                f"{i}: {d['name']}"
+                for i, d in enumerate(devices)
+                if d["max_input_channels"] > 0
+            ]
+            if opts:
+                self.wizard_mic_var.set(opts[0])
+                self.wizard_mic_menu.configure(values=opts)
+            else:
+                self.wizard_mic_var.set("No microphones found")
+                self.wizard_mic_menu.configure(values=["No microphones found"])
+        except Exception as e:
+            self.wizard_mic_menu.configure(values=[f"Error: {e}"])
+
+    def _test_wizard_mic(self):
+        try:
+            import sounddevice as sd
+            import numpy as np
+
+            device_str = self.wizard_mic_var.get()
+            device_idx = int(device_str.split(":")[0])
+            self.wizard_level_label.configure(text="Level: testing...", text_color="gray")
+            self.wizard_test_btn.configure(state="disabled")
+
+            def run():
+                try:
+                    def cb(indata, frames, time, status):
+                        level = float(np.linalg.norm(indata) / frames)
+                        db = 20 * (level and __import__('math').log10(max(level, 0.001)))
+                        color = "green" if db > -40 else "orange" if db > -60 else "red"
+                        self.after(0, lambda d=db, c=color: self.wizard_level_label.configure(
+                            text=f"Level: {d:.0f} dB", text_color=c
+                        ))
+
+                    with sd.InputStream(device=device_idx, channels=1, samplerate=16000, callback=cb):
+                        import time as _t
+                        _t.sleep(3)
+                except Exception as e:
+                    self.after(0, lambda err=e: messagebox.showerror("Mic Test Failed", str(err)))
+                finally:
+                    self.after(0, lambda: self.wizard_test_btn.configure(state="normal"))
+                    self.after(0, lambda: self.wizard_level_label.configure(
+                        text="Level: --", text_color="gray"
+                    ))
+
+            threading.Thread(target=run, daemon=True).start()
+            messagebox.showinfo("Mic Test", "Speak for 3 seconds...")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _nav_buttons(self, parent, back=True, next_text="Next →"):
+        nav = ctk.CTkFrame(parent, fg_color="transparent")
+        nav.pack(side="bottom", fill="x", padx=20, pady=20)
+
+        if back:
+            ctk.CTkButton(
+                nav, text="← Back", width=100, fg_color="gray",
+                command=lambda: self._show_step(self.step - 1),
+            ).pack(side="left")
+
+        ctk.CTkButton(
+            nav, text=next_text, width=120,
+            command=self._next_or_finish,
+        ).pack(side="right")
+
+    def _show_step(self, idx):
+        for f in self.frames:
+            f.pack_forget()
+        self.step = idx
+        self.frames[idx].pack(fill="both", expand=True)
+
+    def _next_or_finish(self):
+        if self.step < len(self.frames) - 1:
+            self._show_step(self.step + 1)
+        else:
+            self._finish()
+
+    def _finish(self):
+        mic_str = self.wizard_mic_var.get()
+        try:
+            mic_idx = int(mic_str.split(":")[0])
+            mic_name = mic_str.split(":", 1)[1].strip()
+        except Exception:
+            mic_idx = 0
+            mic_name = mic_str
+
+        cfg = {
+            "first_run_complete": True,
+            "device": self.chosen_device.get(),
+            "compute_type": "float16" if self.chosen_device.get() == "cuda" else "int8",
+            "mic_index": mic_idx,
+            "mic_name": mic_name,
+        }
+        save_config(cfg)
+        self.grab_release()
+        self.destroy()
+        self.on_complete(cfg)
+
+
+# ──────────────────────────────────────────────
+#  Main App
+# ──────────────────────────────────────────────
 
 class MedicalDictationApp(ctk.CTk):
     def __init__(self):
@@ -24,66 +324,101 @@ class MedicalDictationApp(ctk.CTk):
         self.title(f"VoxChart v{APP_VERSION}")
         self.geometry("900x700")
 
-        app_dir = Path(__file__).parent
-        model_path = app_dir / "models" / "large-v3-turbo"
+        self.output_file = DEFAULT_OUTPUT_FILE
+        self.is_recording = False
+        self.engine = None
 
-        if model_path.exists() and len(list(model_path.iterdir())) > 10:
-            model_loader = str(model_path)
-            print(f"Using offline model from: {model_loader}")
+        cfg = load_config()
+        if not cfg.get("first_run_complete"):
+            # hide main window until wizard completes
+            self.withdraw()
+            self.after(200, self._run_wizard)
         else:
-            model_loader = "large-v3-turbo"
-            print("No local model found, will download on first use")
+            self._init_engine(cfg)
+            self.build_ui()
+
+    def _run_wizard(self):
+        wizard = OnboardingWizard(self, on_complete=self._wizard_done)
+        self.wait_window(wizard)
+
+    def _wizard_done(self, cfg):
+        self._init_engine(cfg)
+        self.build_ui()
+        self.deiconify()  # show main window
+
+    def _init_engine(self, cfg):
+        device = cfg.get("device", "cpu")
+        compute_type = cfg.get("compute_type", "int8")
+        mic_index = cfg.get("mic_index", None)
 
         self.engine = DictationEngine(
-            model_loader,
-            device="cuda",
-            compute_type="float16",
+            model_size="large-v3-turbo",
+            device=device,
+            compute_type=compute_type,
             output_dir=OUTPUT_DIR,
             corpus_dir="training_corpus",
         )
         self.engine.on_text_callback = self.append_transcript
         self.engine.on_status_callback = self.update_status
-
-        self.output_file = DEFAULT_OUTPUT_FILE
-        self.is_recording = False
-        self.build_ui()
+        self._cfg = cfg
 
     def build_ui(self):
+        cfg = self._cfg
+
+        # Top bar
         top_frame = ctk.CTkFrame(self, corner_radius=0)
         top_frame.pack(fill="x", padx=10, pady=10)
 
+        device_label = "GPU (CUDA)" if cfg.get("device") == "cuda" else "CPU"
+        mic_name = cfg.get("mic_name", "Default")
         self.status_label = ctk.CTkLabel(
-            top_frame, text="Status: Ready  |  Device: CPU", justify="left"
+            top_frame,
+            text=f"Status: Ready  |  Device: {device_label}  |  Mic: {mic_name}",
+            justify="left",
         )
         self.status_label.pack(side="left", padx=10, pady=10)
 
         self.theme_var = ctk.StringVar(value="dark")
-        theme_menu = ctk.CTkOptionMenu(
+        ctk.CTkOptionMenu(
             top_frame,
             values=["system", "light", "dark"],
             variable=self.theme_var,
             command=self.change_theme,
             width=120,
-        )
-        theme_menu.pack(side="right", padx=10, pady=10)
+        ).pack(side="right", padx=10, pady=10)
 
+        ctk.CTkButton(
+            top_frame,
+            text="⚙ Re-run Setup",
+            command=self._rerun_wizard,
+            width=110,
+            fg_color="gray",
+        ).pack(side="right", padx=(0, 6), pady=10)
+
+        # Main area
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
         transcript_frame = ctk.CTkFrame(main_frame)
         transcript_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
         ctk.CTkLabel(
             transcript_frame,
             text="Live Transcript",
             font=ctk.CTkFont(size=16, weight="bold"),
         ).pack(anchor="w", padx=10, pady=(10, 5))
+
         self.transcript_text = ctk.CTkTextbox(
-            transcript_frame, font=ctk.CTkFont(family="Courier", size=13), wrap="word"
+            transcript_frame,
+            font=ctk.CTkFont(family="Courier", size=13),
+            wrap="word",
         )
         self.transcript_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
+        # Controls
         controls_frame = ctk.CTkFrame(main_frame)
         controls_frame.pack(fill="x", padx=10, pady=(0, 10))
+
         self.start_stop_button = ctk.CTkButton(
             controls_frame,
             text="Start Dictation",
@@ -92,20 +427,22 @@ class MedicalDictationApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
         )
         self.start_stop_button.pack(side="left", padx=10, pady=10)
-        self.save_as_button = ctk.CTkButton(
+
+        ctk.CTkButton(
             controls_frame, text="Save As...", command=self.save_as, height=40
-        )
-        self.save_as_button.pack(side="left", padx=10, pady=10)
-        self.terms_button = ctk.CTkButton(
+        ).pack(side="left", padx=10, pady=10)
+
+        ctk.CTkButton(
             controls_frame,
             text="Manage Medical Terms",
             command=self.open_terms_manager,
             height=40,
-        )
-        self.terms_button.pack(side="left", padx=10, pady=10)
+        ).pack(side="left", padx=10, pady=10)
 
-        self.build_mic_settings()
+        # Mic row
+        self.build_mic_settings(cfg.get("mic_index", 0))
 
+        # Bottom info
         info_frame = ctk.CTkFrame(self)
         info_frame.pack(fill="x", padx=10, pady=(0, 10))
         ctk.CTkLabel(
@@ -113,55 +450,52 @@ class MedicalDictationApp(ctk.CTk):
             text=f"Output: {os.path.abspath(self.output_file)}",
             justify="left",
         ).pack(side="left", padx=10, pady=10)
-        self.open_folder_button = ctk.CTkButton(
+        ctk.CTkButton(
             info_frame,
             text="Open Output Folder",
             command=self.open_output_folder,
             width=140,
-        )
-        self.open_folder_button.pack(side="right", padx=10, pady=10)
+        ).pack(side="right", padx=10, pady=10)
 
-    def build_mic_settings(self):
+    def build_mic_settings(self, default_idx=0):
         mic_frame = ctk.CTkFrame(self)
         mic_frame.pack(fill="x", padx=10, pady=(0, 5))
 
-        ctk.CTkLabel(mic_frame, text="Microphone:").pack(
-            side="left", padx=(10, 5), pady=10
-        )
+        ctk.CTkLabel(mic_frame, text="Microphone:").pack(side="left", padx=(10, 5), pady=10)
 
         self.mic_var = ctk.StringVar()
         self.mic_menu = ctk.CTkOptionMenu(mic_frame, variable=self.mic_var, width=260)
         self.mic_menu.pack(side="left", padx=5, pady=10)
 
-        refresh_btn = ctk.CTkButton(
-            mic_frame, text="Refresh", command=self.refresh_mics, width=80
+        ctk.CTkButton(mic_frame, text="Refresh", command=self.refresh_mics, width=80).pack(
+            side="left", padx=5, pady=10
         )
-        refresh_btn.pack(side="left", padx=5, pady=10)
-
         self.test_mic_btn = ctk.CTkButton(
             mic_frame, text="Test Mic", command=self.test_microphone, width=90
         )
         self.test_mic_btn.pack(side="left", padx=5, pady=10)
 
-        self.mic_level_label = ctk.CTkLabel(
-            mic_frame, text="Level: --", width=120, anchor="w"
-        )
+        self.mic_level_label = ctk.CTkLabel(mic_frame, text="Level: --", width=120, anchor="w")
         self.mic_level_label.pack(side="left", padx=10, pady=10)
 
-        self.refresh_mics()
+        self.refresh_mics(select_idx=default_idx)
 
-    def refresh_mics(self):
+    def refresh_mics(self, select_idx=None):
         try:
             import sounddevice as sd
             devices = sd.query_devices()
-            mic_options = [
+            opts = [
                 f"{i}: {d['name']}"
                 for i, d in enumerate(devices)
                 if d["max_input_channels"] > 0
             ]
-            if mic_options:
-                self.mic_var.set(mic_options[0])
-                self.mic_menu.configure(values=mic_options)
+            if opts:
+                self.mic_menu.configure(values=opts)
+                if select_idx is not None:
+                    match = next((o for o in opts if o.startswith(f"{select_idx}:")), opts[0])
+                    self.mic_var.set(match)
+                else:
+                    self.mic_var.set(opts[0])
             else:
                 self.mic_menu.configure(values=["No microphones found"])
                 self.mic_var.set("No microphones found")
@@ -173,46 +507,45 @@ class MedicalDictationApp(ctk.CTk):
             import sounddevice as sd
             import numpy as np
 
-            device_str = self.mic_var.get()
-            device_idx = int(device_str.split(":")[0])
-            fs = 16000
-            self.mic_level_label.configure(text="Level: Testing...", text_color="gray")
+            device_idx = int(self.mic_var.get().split(":")[0])
+            self.mic_level_label.configure(text="Level: testing...", text_color="gray")
             self.test_mic_btn.configure(state="disabled")
 
-            def run_test():
+            def run():
                 try:
-                    def callback(indata, frames, time, status):
-                        level = np.linalg.norm(indata) / frames
-                        db = 20 * np.log10(max(0.001, level))
+                    def cb(indata, frames, time, status):
+                        level = float(np.linalg.norm(indata) / frames)
+                        import math
+                        db = 20 * math.log10(max(level, 0.001))
                         color = "green" if db > -40 else "orange" if db > -60 else "red"
-                        label = f"Level: {db:.0f} dB"
-                        self.after(0, lambda lbl=label, clr=color: self.mic_level_label.configure(
-                            text=lbl, text_color=clr
+                        self.after(0, lambda d=db, c=color: self.mic_level_label.configure(
+                            text=f"Level: {d:.0f} dB", text_color=c
                         ))
 
-                    with sd.InputStream(
-                        device=device_idx, channels=1, samplerate=fs, callback=callback
-                    ):
-                        import time
-                        time.sleep(3)
+                    with sd.InputStream(device=device_idx, channels=1, samplerate=16000, callback=cb):
+                        import time as _t
+                        _t.sleep(3)
                 except Exception as e:
-                    self.after(
-                        0,
-                        lambda err=e: messagebox.showerror(
-                            "Mic Test Failed", f"Could not test microphone:\n{err}"
-                        ),
-                    )
+                    self.after(0, lambda err=e: messagebox.showerror("Mic Test Failed", str(err)))
                 finally:
                     self.after(0, lambda: self.test_mic_btn.configure(state="normal"))
                     self.after(0, lambda: self.mic_level_label.configure(
                         text="Level: --", text_color="white"
                     ))
 
-            threading.Thread(target=run_test, daemon=True).start()
+            threading.Thread(target=run, daemon=True).start()
             messagebox.showinfo("Mic Test", "Speak into your microphone for 3 seconds...")
-
         except Exception as e:
-            messagebox.showerror("Error", f"Mic test error: {e}")
+            messagebox.showerror("Error", str(e))
+
+    def _rerun_wizard(self):
+        """Reset config so wizard runs again on next launch, or run now."""
+        cfg = load_config()
+        cfg["first_run_complete"] = False
+        save_config(cfg)
+        self.withdraw()
+        wizard = OnboardingWizard(self, on_complete=self._wizard_done)
+        self.wait_window(wizard)
 
     def change_theme(self, choice: str):
         ctk.set_appearance_mode(choice)
@@ -222,8 +555,7 @@ class MedicalDictationApp(ctk.CTk):
             Path(self.output_file).parent.mkdir(parents=True, exist_ok=True)
             self.start_stop_button.configure(text="Stop Dictation", fg_color="#d93025")
             self.transcript_text.insert(
-                "end",
-                f"\n--- Session started {datetime.now().strftime('%H:%M:%S')} ---\n",
+                "end", f"\n--- Session started {datetime.now().strftime('%H:%M:%S')} ---\n"
             )
             self.engine.start(self.output_file)
             self.is_recording = True
@@ -231,34 +563,32 @@ class MedicalDictationApp(ctk.CTk):
             self.engine.stop()
             self.start_stop_button.configure(text="Start Dictation", fg_color="#2b7cff")
             self.transcript_text.insert(
-                "end",
-                f"\n--- Session stopped {datetime.now().strftime('%H:%M:%S')} ---\n",
+                "end", f"\n--- Session stopped {datetime.now().strftime('%H:%M:%S')} ---\n"
             )
             self.is_recording = False
 
     def append_transcript(self, text: str):
-        self.after(0, lambda t=text: self.safe_append(t))
+        self.after(0, lambda t=text: self._safe_append(t))
 
-    def safe_append(self, text: str):
-        self.transcript_text.insert("end", text)
+    def _safe_append(self, text: str):
+        self.transcript_text.insert("end", text + "\n")
         self.transcript_text.see("end")
 
     def update_status(self, msg: str):
         self.after(0, lambda m=msg: self.status_label.configure(text=f"Status: {m}"))
 
     def save_as(self):
-        filepath = filedialog.asksaveasfilename(
+        fp = filedialog.asksaveasfilename(
             defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
             initialfile="chart_note.txt",
             title="Save Chart Note As...",
         )
-        if not filepath:
+        if not fp:
             return
         try:
-            content = self.transcript_text.get("1.0", "end-1c")
-            Path(filepath).write_text(content, encoding="utf-8")
-            messagebox.showinfo("Saved", f"Chart note saved to {filepath}")
+            Path(fp).write_text(self.transcript_text.get("1.0", "end-1c"), encoding="utf-8")
+            messagebox.showinfo("Saved", f"Chart note saved to {fp}")
         except Exception as e:
             messagebox.showerror("Error", f"Could not save file: {e}")
 
@@ -276,6 +606,10 @@ class MedicalDictationApp(ctk.CTk):
         TermsManagerWindow(self)
 
 
+# ──────────────────────────────────────────────
+#  Medical Terms Manager
+# ──────────────────────────────────────────────
+
 class TermsManagerWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -285,9 +619,7 @@ class TermsManagerWindow(ctk.CTkToplevel):
 
     def build_ui(self):
         ctk.CTkLabel(
-            self,
-            text="Add/Edit Medical Terms",
-            font=ctk.CTkFont(size=16, weight="bold"),
+            self, text="Add/Edit Medical Terms", font=ctk.CTkFont(size=16, weight="bold")
         ).pack(pady=10)
 
         form_frame = ctk.CTkFrame(self)
@@ -312,7 +644,6 @@ class TermsManagerWindow(ctk.CTkToplevel):
         self.cat_entry.grid(row=2, column=1, padx=10, pady=5)
 
         ctk.CTkButton(self, text="Add Term", command=self.add_term).pack(pady=10)
-
         ctk.CTkLabel(
             self,
             text="Tip: Run build_medical_db.py once to create the DB, then use this UI to add more terms.",
@@ -330,12 +661,9 @@ class TermsManagerWindow(ctk.CTkToplevel):
             return
 
         import sqlite3
-        db_path = Path("medicalterms.db")
+        db_path = Path("medical_terms.db")
         if not db_path.exists():
-            messagebox.showerror(
-                "DB Missing",
-                "Run build_medical_db.py first to create medicalterms.db",
-            )
+            messagebox.showerror("DB Missing", "Run build_medical_db.py first.")
             return
 
         conn = sqlite3.connect(str(db_path))

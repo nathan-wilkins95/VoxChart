@@ -1,0 +1,7 @@
+{
+  "first_run_complete": true,
+  "device": "cuda",
+  "compute_type": "float16",
+  "mic_index": 14,
+  "mic_name": "Microphone (Mic in at front panel (black))"
+}

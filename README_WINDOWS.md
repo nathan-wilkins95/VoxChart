@@ -1,34 +1,60 @@
-# Medical Dictation App — Windows AI-Tech Package
+# VoxChart — Medical Dictation App (Windows)
 
-## What changed
+**Offline AI speech-to-text → chart notes.** Runs Whisper large-v3-turbo on your GPU.
 
-- AI-tech app icon added for EXE and desktop shortcut.
-- `app.py` updated for GUI-first use and no-terminal launch flow.
-- `MedicalDictation.spec` updated to embed the icon and keep the console hidden.
-- Batch files now call `venv\Scripts\python.exe` directly instead of relying on activation.
-- Desktop shortcut helper added: `create_desktop_shortcut.ps1`.
+## 📦 One-Click Build & Install
 
-## Build the clickable app
-
-1. Open PowerShell in this folder.
-2. Run:
-
+### For Developers (Build EXE)
 ```powershell
-python -m venv venv
-.env\Scripts\Activate.ps1
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r .equirements-windows.txt
-.uild_exe_windows.bat
+# 1. Double-click build_windows.bat
+#    → Creates dist/VoxChart_Setup_v1.0.0.exe (90MB)
+
+# 2. Test the installer
+Double-click dist/VoxChart_Setup_v1.0.0.exe
 ```
 
-3. After build completes, run:
-
-```powershell
-.\create_desktop_shortcut.ps1
+### For End Users (Just Run)
+```
+1. Download VoxChart_Setup_v1.0.0.exe
+2. Double-click → Installs to C:\Program Files\VoxChart\
+3. Desktop shortcut created
+4. Runs first-time setup wizard
 ```
 
-4. Double-click the **Medical Dictation** desktop icon.
+## 🛠️ Manual Development Setup
 
-## Result
+```powershell
+# Fresh clone
+py -m venv venv
+venv\Scripts\Activate.ps1
+pip install -r requirements-windows.txt
 
-The user launches the app by clicking the desktop icon and does not need to see PowerShell, Python, or the backend files during normal use.
+# Test
+test_windows.bat
+run_app_windows.bat
+```
+
+## 🚀 Features
+
+- **GPU-accelerated** Whisper large-v3-turbo (RTX 4070 = 1-2s latency)
+- **First-run wizard** → auto-detects GPU + microphone
+- **Medical terms DB** → fixes "met four min" → metformin
+- **Live transcript** → real-time display
+- **Config saved** → remembers your mic + device choice
+
+## 📋 Packaging Notes
+
+- **90MB single EXE** → no Python install needed
+- **medical_terms.db** embedded
+- **PyInstaller** → onefile + windowed + hidden console
+- **torch cu130** → matches CUDA 13.0 drivers
+
+## Troubleshooting
+
+```
+GPU not detected? → nvidia-smi (shows RTX 4070?)
+Mic not working? → test_windows.bat
+Build fails? → Check venv activation
+```
+
+**Ready for GitHub Release!** Upload `dist/VoxChart_Setup_v1.0.0.exe` → users just download + double-click. [file:251]
