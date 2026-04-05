@@ -1,8 +1,9 @@
-import sqlite3
 import re
+import sqlite3
 from pathlib import Path
 
 DB_PATH = "medical_terms.db"
+
 
 def load_terms():
     conn = sqlite3.connect(DB_PATH)
@@ -19,7 +20,9 @@ def load_terms():
             mis_to_correct[mis.lower()] = term
     return mis_to_correct, correct_terms
 
+
 MIS_TO_CORRECT, CORRECT_TERMS = load_terms()
+
 
 def correct_medical_text(text: str) -> str:
     text_lower = text.lower()
