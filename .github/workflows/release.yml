@@ -1,0 +1,55 @@
+name: VoxChart Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install faster-whisper customtkinter sounddevice soundfile numpy packaging pyinstaller
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run tests
+        run: |
+          pip install pytest
+          python -m pytest tests/ -v --tb=short
+
+      - name: Build EXE
+        run: |
+          pyinstaller MedicalDictation.spec --clean --noconfirm
+
+      - name: Get version from tag
+        id: get_version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Zip distribution
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\VoxChart\* -DestinationPath dist\VoxChart_${{ steps.get_version.outputs.VERSION }}.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: VoxChart ${{ steps.get_version.outputs.VERSION }}
+          body_path: CHANGELOG.md
+          files: dist/VoxChart_${{ steps.get_version.outputs.VERSION }}.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
