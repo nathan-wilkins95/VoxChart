@@ -4,20 +4,21 @@ import json
 import platform
 import subprocess
 import threading
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import filedialog, messagebox
 from datetime import datetime
 from pathlib import Path
 
 import customtkinter as ctk
 from dictation_engine import DictationEngine
 from epic_exporter import format_for_epic, copy_to_clipboard, export_to_file
+from shortcut_utils import create_shortcut, shortcut_already_exists
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
 OUTPUT_DIR = "chart_notes"
 DEFAULT_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "chart_note.txt")
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 CONFIG_FILE = Path("voxchart_config.json")
 
 
@@ -81,24 +82,24 @@ class OnboardingWizard(ctk.CTkToplevel):
                      font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(40, 10))
         ctk.CTkLabel(f, text=(
             "VoxChart turns your voice into structured medical chart notes\n"
-            "using a fully offline AI — no internet required after setup.\n\n"
+            "using a fully offline AI - no internet required after setup.\n\n"
             "This wizard will configure your microphone and compute device.\n"
             "It only runs once."
         ), font=ctk.CTkFont(size=13), justify="center").pack(pady=10, padx=30)
-        ctk.CTkLabel(f, text="Click Next to begin  →",
+        ctk.CTkLabel(f, text="Click Next to begin",
                      font=ctk.CTkFont(size=12), text_color="gray").pack(pady=(20, 0))
         self._nav_buttons(f, back=False)
         return f
 
     def _build_device_step(self):
         f = ctk.CTkFrame(self, fg_color="transparent")
-        ctk.CTkLabel(f, text="Step 1 of 2 — Compute Device",
+        ctk.CTkLabel(f, text="Step 1 of 2 - Compute Device",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(30, 10))
         if self.gpu_available:
-            gpu_label = f"✅  GPU detected: {self.gpu_name}"
-            gpu_color, rec_text = "green", "GPU recommended — faster transcription."
+            gpu_label = f"GPU detected: {self.gpu_name}"
+            gpu_color, rec_text = "green", "GPU recommended - faster transcription."
         else:
-            gpu_label = "⚠️  No NVIDIA GPU detected"
+            gpu_label = "No NVIDIA GPU detected"
             gpu_color, rec_text = "orange", "CPU mode will be used. Transcription may be slower."
         ctk.CTkLabel(f, text=gpu_label,
                      font=ctk.CTkFont(size=13, weight="bold"), text_color=gpu_color).pack(pady=(10, 4))
@@ -107,10 +108,10 @@ class OnboardingWizard(ctk.CTkToplevel):
         ctk.CTkLabel(f, text="Select compute device:", font=ctk.CTkFont(size=13)).pack()
         btn_frame = ctk.CTkFrame(f, fg_color="transparent")
         btn_frame.pack(pady=10)
-        ctk.CTkRadioButton(btn_frame, text="GPU (CUDA)  — fast, requires NVIDIA GPU",
+        ctk.CTkRadioButton(btn_frame, text="GPU (CUDA) - fast, requires NVIDIA GPU",
                            variable=self.chosen_device, value="cuda",
                            state="normal" if self.gpu_available else "disabled").pack(anchor="w", padx=20, pady=6)
-        ctk.CTkRadioButton(btn_frame, text="CPU  — works on any machine, slower",
+        ctk.CTkRadioButton(btn_frame, text="CPU - works on any machine, slower",
                            variable=self.chosen_device, value="cpu").pack(anchor="w", padx=20, pady=6)
         if not self.gpu_available:
             self.chosen_device.set("cpu")
@@ -119,7 +120,7 @@ class OnboardingWizard(ctk.CTkToplevel):
 
     def _build_mic_step(self):
         f = ctk.CTkFrame(self, fg_color="transparent")
-        ctk.CTkLabel(f, text="Step 2 of 2 — Microphone",
+        ctk.CTkLabel(f, text="Step 2 of 2 - Microphone",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(30, 10))
         ctk.CTkLabel(f, text="Select the microphone you will use for dictation.",
                      font=ctk.CTkFont(size=13)).pack(pady=(0, 10))
@@ -136,7 +137,7 @@ class OnboardingWizard(ctk.CTkToplevel):
                                                 font=ctk.CTkFont(size=12), text_color="gray")
         self.wizard_level_label.pack(pady=4)
         self._refresh_wizard_mics()
-        self._nav_buttons(f, next_text="Finish ✓")
+        self._nav_buttons(f, next_text="Finish")
         return f
 
     def _refresh_wizard_mics(self):
@@ -180,11 +181,11 @@ class OnboardingWizard(ctk.CTkToplevel):
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    def _nav_buttons(self, parent, back=True, next_text="Next →"):
+    def _nav_buttons(self, parent, back=True, next_text="Next"):
         nav = ctk.CTkFrame(parent, fg_color="transparent")
         nav.pack(side="bottom", fill="x", padx=20, pady=20)
         if back:
-            ctk.CTkButton(nav, text="← Back", width=100, fg_color="gray",
+            ctk.CTkButton(nav, text="Back", width=100, fg_color="gray",
                           command=lambda: self._show_step(self.step - 1)).pack(side="left")
         ctk.CTkButton(nav, text=next_text, width=120,
                       command=self._next_or_finish).pack(side="right")
@@ -227,8 +228,6 @@ class OnboardingWizard(ctk.CTkToplevel):
 # ──────────────────────────────────────────────
 
 class EpicExportDialog(ctk.CTkToplevel):
-    """Dialog to collect optional patient info before Epic export."""
-
     def __init__(self, parent, transcript: str):
         super().__init__(parent)
         self.title("Copy to Epic")
@@ -236,24 +235,20 @@ class EpicExportDialog(ctk.CTkToplevel):
         self.resizable(False, False)
         self.grab_set()
         self.transcript = transcript
-        self.result = None
         self._build_ui()
 
     def _build_ui(self):
         ctk.CTkLabel(self, text="Epic Export",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(20, 4))
-        ctk.CTkLabel(self,
-                     text="Optional: fill in patient info for the note header.",
+        ctk.CTkLabel(self, text="Optional: fill in patient info for the note header.",
                      font=ctk.CTkFont(size=12), text_color="gray").pack(pady=(0, 14))
-
         form = ctk.CTkFrame(self)
         form.pack(fill="x", padx=30, pady=4)
-
         fields = [
-            ("Provider Name",  "e.g., Dr. Smith"),
-            ("Patient Name",   "e.g., John Doe"),
-            ("Date of Birth",  "e.g., 01/15/1970"),
-            ("MRN",            "e.g., 123456"),
+            ("Provider Name", "e.g., Dr. Smith"),
+            ("Patient Name",  "e.g., John Doe"),
+            ("Date of Birth", "e.g., 01/15/1970"),
+            ("MRN",           "e.g., 123456"),
         ]
         self._entries: dict[str, ctk.CTkEntry] = {}
         for row, (label, placeholder) in enumerate(fields):
@@ -262,46 +257,29 @@ class EpicExportDialog(ctk.CTkToplevel):
             entry = ctk.CTkEntry(form, width=260, placeholder_text=placeholder)
             entry.grid(row=row, column=1, pady=6)
             self._entries[label] = entry
-
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=30, pady=20)
-
         ctk.CTkButton(btn_frame, text="Cancel", fg_color="gray", width=100,
                       command=self.destroy).pack(side="left")
-        ctk.CTkButton(btn_frame, text="📋 Copy to Epic Clipboard", width=220,
+        ctk.CTkButton(btn_frame, text="Copy to Epic Clipboard", width=220,
                       command=self._export).pack(side="right")
 
     def _export(self):
-        provider = self._entries["Provider Name"].get().strip()
-        patient  = self._entries["Patient Name"].get().strip()
-        dob      = self._entries["Date of Birth"].get().strip()
-        mrn      = self._entries["MRN"].get().strip()
-
         formatted = format_for_epic(
             self.transcript,
-            provider_name=provider,
-            patient_name=patient,
-            dob=dob,
-            mrn=mrn,
+            provider_name=self._entries["Provider Name"].get().strip(),
+            patient_name=self._entries["Patient Name"].get().strip(),
+            dob=self._entries["Date of Birth"].get().strip(),
+            mrn=self._entries["MRN"].get().strip(),
         )
-
-        # Save to epic_exports/ folder
         saved_path = export_to_file(formatted)
-
-        # Copy to clipboard
         copy_to_clipboard(formatted)
-
         self.grab_release()
         self.destroy()
-
-        messagebox.showinfo(
-            "Copied to Clipboard!",
-            f"✅ Epic note copied to clipboard!\n\n"
-            f"1. Open Epic\n"
-            f"2. Open your note / SmartPhrase field\n"
-            f"3. Press Ctrl+V to paste\n\n"
-            f"Also saved to:\n{saved_path}"
-        )
+        messagebox.showinfo("Copied!",
+            f"Epic note copied to clipboard!\n\n"
+            f"1. Open Epic\n2. Open your note field\n3. Press Ctrl+V\n\n"
+            f"Also saved to:\n{saved_path}")
 
 
 # ──────────────────────────────────────────────
@@ -313,7 +291,6 @@ class MedicalDictationApp(ctk.CTk):
         super().__init__()
         self.title(f"VoxChart v{APP_VERSION}")
         self.geometry("950x720")
-
         self.output_file = DEFAULT_OUTPUT_FILE
         self.is_recording = False
         self.engine = None
@@ -326,6 +303,14 @@ class MedicalDictationApp(ctk.CTk):
             self._init_engine(cfg)
             self.build_ui()
             self._bind_shortcuts()
+            # Auto-create shortcut silently if never done before
+            if not shortcut_already_exists():
+                self.after(1500, self._auto_create_shortcut)
+
+    def _auto_create_shortcut(self):
+        ok, msg = create_shortcut(silent=True)
+        if ok:
+            self.update_status("Desktop shortcut created automatically.")
 
     def _bind_shortcuts(self):
         self.bind("<Control-space>", lambda e: self.toggle_dictation())
@@ -344,24 +329,25 @@ class MedicalDictationApp(ctk.CTk):
     def _show_shortcuts_help(self):
         messagebox.showinfo("Keyboard Shortcuts",
             "VoxChart Keyboard Shortcuts\n\n"
-            "Ctrl + Space   →   Start / Stop Dictation\n"
-            "Ctrl + S       →   Save As...\n"
-            "Ctrl + E       →   Copy to Epic (NEW)\n"
-            "Ctrl + O       →   Open Output Folder\n"
-            "Esc            →   Clear Transcript (when stopped)\n"
-            "F1             →   Show This Help\n"
-            "F5             →   Refresh Microphone List\n"
+            "Ctrl + Space   ->  Start / Stop Dictation\n"
+            "Ctrl + S       ->  Save As...\n"
+            "Ctrl + E       ->  Copy to Epic\n"
+            "Ctrl + O       ->  Open Output Folder\n"
+            "Esc            ->  Clear Transcript (when stopped)\n"
+            "F1             ->  Show This Help\n"
+            "F5             ->  Refresh Microphone List\n"
         )
 
     def _run_wizard(self):
-        wizard = OnboardingWizard(self, on_complete=self._wizard_done)
-        self.wait_window(wizard)
+        OnboardingWizard(self, on_complete=self._wizard_done)
 
     def _wizard_done(self, cfg):
         self._init_engine(cfg)
         self.build_ui()
         self._bind_shortcuts()
         self.deiconify()
+        if not shortcut_already_exists():
+            self.after(1500, self._auto_create_shortcut)
 
     def _init_engine(self, cfg):
         self.engine = DictationEngine(
@@ -393,13 +379,21 @@ class MedicalDictationApp(ctk.CTk):
         ctk.CTkOptionMenu(top_frame, values=["system", "light", "dark"],
                           variable=self.theme_var, command=self.change_theme,
                           width=120).pack(side="right", padx=10, pady=10)
-        ctk.CTkButton(top_frame, text="⚙ Re-run Setup", command=self._rerun_wizard,
+        ctk.CTkButton(top_frame, text="Re-run Setup", command=self._rerun_wizard,
                       width=110, fg_color="gray").pack(side="right", padx=(0, 6), pady=10)
+        # Create Shortcut button
+        ctk.CTkButton(
+            top_frame,
+            text="Pin to Desktop",
+            command=self.create_shortcut_manual,
+            width=120,
+            fg_color="#444",
+            hover_color="#666",
+        ).pack(side="right", padx=(0, 6), pady=10)
 
         # Main area
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
         transcript_frame = ctk.CTkFrame(main_frame)
         transcript_frame.pack(fill="both", expand=True, padx=10, pady=10)
         ctk.CTkLabel(transcript_frame, text="Live Transcript",
@@ -411,49 +405,36 @@ class MedicalDictationApp(ctk.CTk):
         # Controls row
         controls_frame = ctk.CTkFrame(main_frame)
         controls_frame.pack(fill="x", padx=10, pady=(0, 10))
-
         self.start_stop_button = ctk.CTkButton(
-            controls_frame, text="▶  Start  (Ctrl+Space)",
+            controls_frame, text="Start  (Ctrl+Space)",
             command=self.toggle_dictation, height=40,
             font=ctk.CTkFont(size=14, weight="bold"),
         )
         self.start_stop_button.pack(side="left", padx=10, pady=10)
-
-        ctk.CTkButton(controls_frame, text="💾 Save As  (Ctrl+S)",
+        ctk.CTkButton(controls_frame, text="Save As  (Ctrl+S)",
                       command=self.save_as, height=40).pack(side="left", padx=6, pady=10)
-
-        # ── EPIC BUTTON ──────────────────────────────────────────────────────
         ctk.CTkButton(
-            controls_frame,
-            text="🏥 Copy to Epic  (Ctrl+E)",
-            command=self.copy_to_epic,
-            height=40,
-            fg_color="#1a6b3c",
-            hover_color="#23994f",
+            controls_frame, text="Copy to Epic  (Ctrl+E)",
+            command=self.copy_to_epic, height=40,
+            fg_color="#1a6b3c", hover_color="#23994f",
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(side="left", padx=6, pady=10)
-        # ─────────────────────────────────────────────────────────────────────
-
-        ctk.CTkButton(controls_frame, text="🗑 Clear  (Esc)",
+        ctk.CTkButton(controls_frame, text="Clear  (Esc)",
                       command=self._clear_transcript, height=40,
                       fg_color="gray").pack(side="left", padx=6, pady=10)
-
         ctk.CTkButton(controls_frame, text="Manage Medical Terms",
                       command=self.open_terms_manager, height=40).pack(side="left", padx=6, pady=10)
-
-        ctk.CTkButton(controls_frame, text="❓ Shortcuts  (F1)",
+        ctk.CTkButton(controls_frame, text="Shortcuts  (F1)",
                       command=self._show_shortcuts_help, height=40,
                       fg_color="gray").pack(side="right", padx=10, pady=10)
 
-        # Mic row
         self.build_mic_settings(cfg.get("mic_index", 0))
 
-        # Bottom info
         info_frame = ctk.CTkFrame(self)
         info_frame.pack(fill="x", padx=10, pady=(0, 10))
         ctk.CTkLabel(info_frame, text=f"Output: {os.path.abspath(self.output_file)}",
                      justify="left").pack(side="left", padx=10, pady=10)
-        ctk.CTkButton(info_frame, text="📂 Open Folder  (Ctrl+O)",
+        ctk.CTkButton(info_frame, text="Open Folder  (Ctrl+O)",
                       command=self.open_output_folder, width=180).pack(side="right", padx=10, pady=10)
 
     def build_mic_settings(self, default_idx=0):
@@ -520,8 +501,7 @@ class MedicalDictationApp(ctk.CTk):
         cfg["first_run_complete"] = False
         save_config(cfg)
         self.withdraw()
-        wizard = OnboardingWizard(self, on_complete=self._wizard_done)
-        self.wait_window(wizard)
+        OnboardingWizard(self, on_complete=self._wizard_done)
 
     def change_theme(self, choice: str):
         ctk.set_appearance_mode(choice)
@@ -529,23 +509,32 @@ class MedicalDictationApp(ctk.CTk):
     def toggle_dictation(self):
         if not self.is_recording:
             Path(self.output_file).parent.mkdir(parents=True, exist_ok=True)
-            self.start_stop_button.configure(text="⏹  Stop  (Ctrl+Space)", fg_color="#d93025")
+            self.start_stop_button.configure(text="Stop  (Ctrl+Space)", fg_color="#d93025")
             self.transcript_text.insert("end", f"\n--- Session started {datetime.now().strftime('%H:%M:%S')} ---\n")
             self.engine.start(self.output_file)
             self.is_recording = True
         else:
             self.engine.stop()
-            self.start_stop_button.configure(text="▶  Start  (Ctrl+Space)", fg_color="#2b7cff")
+            self.start_stop_button.configure(text="Start  (Ctrl+Space)", fg_color="#2b7cff")
             self.transcript_text.insert("end", f"\n--- Session stopped {datetime.now().strftime('%H:%M:%S')} ---\n")
             self.is_recording = False
 
     def copy_to_epic(self):
-        """Open Epic Export dialog to format + clipboard-copy the current transcript."""
         transcript = self.transcript_text.get("1.0", "end-1c").strip()
         if not transcript:
             messagebox.showwarning("No Transcript", "Nothing to export. Dictate something first!")
             return
         EpicExportDialog(self, transcript)
+
+    def create_shortcut_manual(self):
+        """Manually triggered from the Pin to Desktop button."""
+        ok, msg = create_shortcut(silent=False)
+        if ok:
+            messagebox.showinfo("Shortcut Created",
+                f"Desktop shortcut created successfully!\n\n"
+                f"You can now launch VoxChart directly from your desktop.")
+        else:
+            messagebox.showerror("Shortcut Failed", f"Could not create shortcut:\n{msg}")
 
     def append_transcript(self, text: str):
         self.after(0, lambda t=text: self._safe_append(t))
