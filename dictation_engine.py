@@ -117,7 +117,7 @@ class DictationEngine:
         audio_buffer = []
         buffer_duration = 0.0
         last_flush_time = time.time()
-        buffer_seconds = 15
+        buffer_seconds = 5  # flush every 5s for responsive transcription
 
         with open(output_file, "a", encoding="utf-8") as f:
             while not self.stop_event.is_set() or not self.audio_queue.empty():
@@ -130,7 +130,7 @@ class DictationEngine:
                 buffer_duration += len(data) / (SAMPLE_RATE * 2)
 
                 flush_ready = buffer_duration >= buffer_seconds or (
-                    time.time() - last_flush_time > 8 and buffer_duration > 3
+                    time.time() - last_flush_time > 4 and buffer_duration > 1
                 )
                 if not flush_ready:
                     continue
