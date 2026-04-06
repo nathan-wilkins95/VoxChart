@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -26,3 +26,16 @@ installer_build/
 *.pt
 
 installer/output/*.exe
+
+# Code signing - NEVER commit private keys
+signing/*.pfx
+signing/*.p12
+signing/*.key
+signing/*.pem
+
+# Logs
+logs/
+*.log
+
+# Runtime markers
+.shortcut_created
