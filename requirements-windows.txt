@@ -3,3 +3,7 @@ customtkinter
 sounddevice
 soundfile
 numpy
+packaging
+transformers
+datasets
+accelerate

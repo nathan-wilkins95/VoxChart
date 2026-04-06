@@ -8,7 +8,7 @@ import os
 block_cipher = None
 
 # Collect faster-whisper model data and ctranslate2 binaries
-whisper_datas  = collect_data_files("faster_whisper")
+whisper_datas    = collect_data_files("faster_whisper")
 ctranslate_datas = collect_data_files("ctranslate2")
 
 a = Analysis(
@@ -16,13 +16,13 @@ a = Analysis(
     pathex=['.'],
     binaries=[],
     datas=[
-        ('assets',            'assets'),
+        ('assets',               'assets'),
         ('voxchart_config.json', '.'),
         *whisper_datas,
         *ctranslate_datas,
     ],
     hiddenimports=[
-        # App modules
+        # Core app modules
         'dictation_engine',
         'epic_exporter',
         'medical_postprocessor',
@@ -32,6 +32,11 @@ a = Analysis(
         'templates',
         'updater',
         'build_medical_db',
+        # v1.6 modules
+        'settings',
+        'autosave',
+        'training_corpus',
+        'version',
         # ML / audio
         'faster_whisper',
         'ctranslate2',
@@ -41,6 +46,10 @@ a = Analysis(
         'torch',
         'packaging',
         'packaging.version',
+        # HuggingFace (optional fine-tune)
+        'transformers',
+        'datasets',
+        'accelerate',
         # UI
         'customtkinter',
         'tkinter',
@@ -82,14 +91,14 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,                        # no console window
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
     version='version_info.txt' if os.path.exists('version_info.txt') else None,
-    icon=['assets\\VoxChart.ico'],        # <-- fixed path
+    icon=['assets\\VoxChart.ico'],
 )
 
 coll = COLLECT(
