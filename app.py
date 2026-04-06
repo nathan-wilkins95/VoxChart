@@ -16,7 +16,7 @@ ctk.set_default_color_theme("dark-blue")
 
 OUTPUT_DIR = "chart_notes"
 DEFAULT_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "chart_note.txt")
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 CONFIG_FILE = Path("voxchart_config.json")
 
 
@@ -330,12 +330,38 @@ class MedicalDictationApp(ctk.CTk):
 
         cfg = load_config()
         if not cfg.get("first_run_complete"):
-            # hide main window until wizard completes
             self.withdraw()
             self.after(200, self._run_wizard)
         else:
             self._init_engine(cfg)
             self.build_ui()
+            self._bind_shortcuts()
+
+    def _bind_shortcuts(self):
+        """Keyboard shortcuts for hands-free dictation workflow."""
+        self.bind("<Control-space>", lambda e: self.toggle_dictation())
+        self.bind("<Control-s>", lambda e: self.save_as())
+        self.bind("<Control-o>", lambda e: self.open_output_folder())
+        self.bind("<Escape>", lambda e: self._clear_transcript())
+        self.bind("<F1>", lambda e: self._show_shortcuts_help())
+        self.bind("<F5>", lambda e: self.refresh_mics())
+
+    def _clear_transcript(self):
+        if not self.is_recording:
+            self.transcript_text.delete("1.0", "end")
+            self.update_status("Transcript cleared.")
+
+    def _show_shortcuts_help(self):
+        help_text = (
+            "VoxChart Keyboard Shortcuts\n\n"
+            "Ctrl + Space   →   Start / Stop Dictation\n"
+            "Ctrl + S       →   Save As...\n"
+            "Ctrl + O       →   Open Output Folder\n"
+            "Esc            →   Clear Transcript (when stopped)\n"
+            "F1             →   Show This Help\n"
+            "F5             →   Refresh Microphone List\n"
+        )
+        messagebox.showinfo("Keyboard Shortcuts", help_text)
 
     def _run_wizard(self):
         wizard = OnboardingWizard(self, on_complete=self._wizard_done)
@@ -344,13 +370,12 @@ class MedicalDictationApp(ctk.CTk):
     def _wizard_done(self, cfg):
         self._init_engine(cfg)
         self.build_ui()
-        self.deiconify()  # show main window
+        self._bind_shortcuts()
+        self.deiconify()
 
     def _init_engine(self, cfg):
         device = cfg.get("device", "cpu")
         compute_type = cfg.get("compute_type", "int8")
-        mic_index = cfg.get("mic_index", None)
-
         self.engine = DictationEngine(
             model_size="large-v3-turbo",
             device=device,
@@ -373,7 +398,7 @@ class MedicalDictationApp(ctk.CTk):
         mic_name = cfg.get("mic_name", "Default")
         self.status_label = ctk.CTkLabel(
             top_frame,
-            text=f"Status: Ready  |  Device: {device_label}  |  Mic: {mic_name}",
+            text=f"Status: Ready  |  Device: {device_label}  |  Mic: {mic_name}  |  F1 = Shortcuts",
             justify="left",
         )
         self.status_label.pack(side="left", padx=10, pady=10)
@@ -421,7 +446,7 @@ class MedicalDictationApp(ctk.CTk):
 
         self.start_stop_button = ctk.CTkButton(
             controls_frame,
-            text="Start Dictation",
+            text="▶  Start  (Ctrl+Space)",
             command=self.toggle_dictation,
             height=40,
             font=ctk.CTkFont(size=14, weight="bold"),
@@ -429,7 +454,15 @@ class MedicalDictationApp(ctk.CTk):
         self.start_stop_button.pack(side="left", padx=10, pady=10)
 
         ctk.CTkButton(
-            controls_frame, text="Save As...", command=self.save_as, height=40
+            controls_frame, text="💾 Save As  (Ctrl+S)", command=self.save_as, height=40
+        ).pack(side="left", padx=10, pady=10)
+
+        ctk.CTkButton(
+            controls_frame,
+            text="🗑 Clear  (Esc)",
+            command=self._clear_transcript,
+            height=40,
+            fg_color="gray",
         ).pack(side="left", padx=10, pady=10)
 
         ctk.CTkButton(
@@ -438,6 +471,14 @@ class MedicalDictationApp(ctk.CTk):
             command=self.open_terms_manager,
             height=40,
         ).pack(side="left", padx=10, pady=10)
+
+        ctk.CTkButton(
+            controls_frame,
+            text="❓ Shortcuts  (F1)",
+            command=self._show_shortcuts_help,
+            height=40,
+            fg_color="gray",
+        ).pack(side="right", padx=10, pady=10)
 
         # Mic row
         self.build_mic_settings(cfg.get("mic_index", 0))
@@ -452,9 +493,9 @@ class MedicalDictationApp(ctk.CTk):
         ).pack(side="left", padx=10, pady=10)
         ctk.CTkButton(
             info_frame,
-            text="Open Output Folder",
+            text="📂 Open Folder  (Ctrl+O)",
             command=self.open_output_folder,
-            width=140,
+            width=180,
         ).pack(side="right", padx=10, pady=10)
 
     def build_mic_settings(self, default_idx=0):
@@ -467,7 +508,7 @@ class MedicalDictationApp(ctk.CTk):
         self.mic_menu = ctk.CTkOptionMenu(mic_frame, variable=self.mic_var, width=260)
         self.mic_menu.pack(side="left", padx=5, pady=10)
 
-        ctk.CTkButton(mic_frame, text="Refresh", command=self.refresh_mics, width=80).pack(
+        ctk.CTkButton(mic_frame, text="Refresh (F5)", command=self.refresh_mics, width=100).pack(
             side="left", padx=5, pady=10
         )
         self.test_mic_btn = ctk.CTkButton(
@@ -539,7 +580,6 @@ class MedicalDictationApp(ctk.CTk):
             messagebox.showerror("Error", str(e))
 
     def _rerun_wizard(self):
-        """Reset config so wizard runs again on next launch, or run now."""
         cfg = load_config()
         cfg["first_run_complete"] = False
         save_config(cfg)
@@ -553,7 +593,9 @@ class MedicalDictationApp(ctk.CTk):
     def toggle_dictation(self):
         if not self.is_recording:
             Path(self.output_file).parent.mkdir(parents=True, exist_ok=True)
-            self.start_stop_button.configure(text="Stop Dictation", fg_color="#d93025")
+            self.start_stop_button.configure(
+                text="⏹  Stop  (Ctrl+Space)", fg_color="#d93025"
+            )
             self.transcript_text.insert(
                 "end", f"\n--- Session started {datetime.now().strftime('%H:%M:%S')} ---\n"
             )
@@ -561,7 +603,9 @@ class MedicalDictationApp(ctk.CTk):
             self.is_recording = True
         else:
             self.engine.stop()
-            self.start_stop_button.configure(text="Start Dictation", fg_color="#2b7cff")
+            self.start_stop_button.configure(
+                text="▶  Start  (Ctrl+Space)", fg_color="#2b7cff"
+            )
             self.transcript_text.insert(
                 "end", f"\n--- Session stopped {datetime.now().strftime('%H:%M:%S')} ---\n"
             )
