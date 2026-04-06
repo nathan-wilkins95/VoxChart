@@ -1,9 +1,11 @@
 import os
 import sys
 import json
+import math
 import platform
 import subprocess
 import threading
+import webbrowser
 from tkinter import filedialog, messagebox
 from datetime import datetime
 from pathlib import Path
@@ -12,9 +14,12 @@ import customtkinter as ctk
 from dictation_engine import DictationEngine
 from epic_exporter import format_for_epic, copy_to_clipboard, export_to_file
 from shortcut_utils import create_shortcut, shortcut_already_exists
-from crash_reporter import setup_logging, install_exception_hook, BugReportDialog, get_recent_log
+from crash_reporter import setup_logging, install_exception_hook, BugReportDialog, get_recent_log, LOG_DIR, _open_folder
+from session_history import init_db, start_session, stop_session, list_sessions, delete_session, read_transcript
+from templates import all_templates, get_template, add_custom_template
+from updater import check_for_update
 
-# ── Bootstrap: logging + crash hook installed before anything else ─────────────
+# -- Bootstrap --
 setup_logging()
 install_exception_hook()
 
@@ -24,10 +29,10 @@ logger = logging.getLogger("voxchart.app")
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
-OUTPUT_DIR = "chart_notes"
+OUTPUT_DIR          = "chart_notes"
 DEFAULT_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "chart_note.txt")
-APP_VERSION = "1.4.0"
-CONFIG_FILE = Path("voxchart_config.json")
+APP_VERSION         = "1.5.0"
+CONFIG_FILE         = Path("voxchart_config.json")
 
 
 def load_config():
@@ -47,16 +52,15 @@ def detect_gpu():
     try:
         import torch
         if torch.cuda.is_available():
-            name = torch.cuda.get_device_name(0)
-            return True, name
+            return True, torch.cuda.get_device_name(0)
     except Exception:
         pass
     return False, None
 
 
-# ────────────────────────────────────────────────────────────
-#  First-Run Onboarding Wizard
-# ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+#  Onboarding Wizard
+# ---------------------------------------------------------------------------
 
 class OnboardingWizard(ctk.CTkToplevel):
     def __init__(self, parent, on_complete):
@@ -66,23 +70,16 @@ class OnboardingWizard(ctk.CTkToplevel):
         self.resizable(False, False)
         self.grab_set()
         self.on_complete = on_complete
-
         self.step = 0
         self.gpu_available, self.gpu_name = detect_gpu()
-        self.chosen_device = ctk.StringVar(value="cuda" if self.gpu_available else "cpu")
-        self.chosen_mic_idx = ctk.IntVar(value=0)
-        self.chosen_mic_name = ctk.StringVar(value="")
-
+        self.chosen_device   = ctk.StringVar(value="cuda" if self.gpu_available else "cpu")
+        self.wizard_mic_var  = ctk.StringVar()
         self.frames = []
         self._build_steps()
         self._show_step(0)
 
     def _build_steps(self):
-        self.frames = [
-            self._build_welcome(),
-            self._build_device_step(),
-            self._build_mic_step(),
-        ]
+        self.frames = [self._build_welcome(), self._build_device_step(), self._build_mic_step()]
 
     def _build_welcome(self):
         f = ctk.CTkFrame(self, fg_color="transparent")
@@ -90,37 +87,27 @@ class OnboardingWizard(ctk.CTkToplevel):
                      font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(40, 10))
         ctk.CTkLabel(f, text=(
             "VoxChart turns your voice into structured medical chart notes\n"
-            "using a fully offline AI - no internet required after setup.\n\n"
-            "This wizard will configure your microphone and compute device.\n"
-            "It only runs once."
+            "using a fully offline AI — no internet required after setup.\n\n"
+            "This wizard will configure your microphone and compute device."
         ), font=ctk.CTkFont(size=13), justify="center").pack(pady=10, padx=30)
-        ctk.CTkLabel(f, text="Click Next to begin",
-                     font=ctk.CTkFont(size=12), text_color="gray").pack(pady=(20, 0))
         self._nav_buttons(f, back=False)
         return f
 
     def _build_device_step(self):
         f = ctk.CTkFrame(self, fg_color="transparent")
-        ctk.CTkLabel(f, text="Step 1 of 2 - Compute Device",
+        ctk.CTkLabel(f, text="Step 1 of 2 — Compute Device",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(30, 10))
-        if self.gpu_available:
-            gpu_label = f"GPU detected: {self.gpu_name}"
-            gpu_color, rec_text = "green", "GPU recommended - faster transcription."
-        else:
-            gpu_label = "No NVIDIA GPU detected"
-            gpu_color, rec_text = "orange", "CPU mode will be used. Transcription may be slower."
-        ctk.CTkLabel(f, text=gpu_label,
-                     font=ctk.CTkFont(size=13, weight="bold"), text_color=gpu_color).pack(pady=(10, 4))
-        ctk.CTkLabel(f, text=rec_text,
-                     font=ctk.CTkFont(size=12), text_color="gray").pack(pady=(0, 20))
+        gpu_label = f"GPU detected: {self.gpu_name}" if self.gpu_available else "No NVIDIA GPU detected"
+        gpu_color = "green" if self.gpu_available else "orange"
+        rec_text  = "GPU recommended — faster transcription." if self.gpu_available else "CPU mode. Transcription may be slower."
+        ctk.CTkLabel(f, text=gpu_label, font=ctk.CTkFont(size=13, weight="bold"), text_color=gpu_color).pack(pady=(10, 4))
+        ctk.CTkLabel(f, text=rec_text,  font=ctk.CTkFont(size=12), text_color="gray").pack(pady=(0, 20))
         ctk.CTkLabel(f, text="Select compute device:", font=ctk.CTkFont(size=13)).pack()
-        btn_frame = ctk.CTkFrame(f, fg_color="transparent")
-        btn_frame.pack(pady=10)
-        ctk.CTkRadioButton(btn_frame, text="GPU (CUDA) - fast, requires NVIDIA GPU",
-                           variable=self.chosen_device, value="cuda",
+        row = ctk.CTkFrame(f, fg_color="transparent")
+        row.pack(pady=10)
+        ctk.CTkRadioButton(row, text="GPU (CUDA)", variable=self.chosen_device, value="cuda",
                            state="normal" if self.gpu_available else "disabled").pack(anchor="w", padx=20, pady=6)
-        ctk.CTkRadioButton(btn_frame, text="CPU - works on any machine, slower",
-                           variable=self.chosen_device, value="cpu").pack(anchor="w", padx=20, pady=6)
+        ctk.CTkRadioButton(row, text="CPU", variable=self.chosen_device, value="cpu").pack(anchor="w", padx=20, pady=6)
         if not self.gpu_available:
             self.chosen_device.set("cpu")
         self._nav_buttons(f)
@@ -128,22 +115,16 @@ class OnboardingWizard(ctk.CTkToplevel):
 
     def _build_mic_step(self):
         f = ctk.CTkFrame(self, fg_color="transparent")
-        ctk.CTkLabel(f, text="Step 2 of 2 - Microphone",
+        ctk.CTkLabel(f, text="Step 2 of 2 — Microphone",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(30, 10))
-        ctk.CTkLabel(f, text="Select the microphone you will use for dictation.",
-                     font=ctk.CTkFont(size=13)).pack(pady=(0, 10))
-        self.wizard_mic_var = ctk.StringVar()
         self.wizard_mic_menu = ctk.CTkOptionMenu(f, variable=self.wizard_mic_var, width=380)
         self.wizard_mic_menu.pack(pady=6)
-        btn_row = ctk.CTkFrame(f, fg_color="transparent")
-        btn_row.pack(pady=6)
-        ctk.CTkButton(btn_row, text="Refresh", command=self._refresh_wizard_mics, width=90).pack(side="left", padx=6)
-        self.wizard_test_btn = ctk.CTkButton(btn_row, text="Test Mic",
-                                              command=self._test_wizard_mic, width=90)
-        self.wizard_test_btn.pack(side="left", padx=6)
         self.wizard_level_label = ctk.CTkLabel(f, text="Level: --",
                                                 font=ctk.CTkFont(size=12), text_color="gray")
         self.wizard_level_label.pack(pady=4)
+        row = ctk.CTkFrame(f, fg_color="transparent")
+        row.pack(pady=6)
+        ctk.CTkButton(row, text="Refresh", command=self._refresh_wizard_mics, width=90).pack(side="left", padx=6)
         self._refresh_wizard_mics()
         self._nav_buttons(f, next_text="Finish")
         return f
@@ -151,43 +132,12 @@ class OnboardingWizard(ctk.CTkToplevel):
     def _refresh_wizard_mics(self):
         try:
             import sounddevice as sd
-            devices = sd.query_devices()
-            opts = [f"{i}: {d['name']}" for i, d in enumerate(devices) if d["max_input_channels"] > 0]
-            if opts:
-                self.wizard_mic_var.set(opts[0])
-                self.wizard_mic_menu.configure(values=opts)
-            else:
-                self.wizard_mic_var.set("No microphones found")
-                self.wizard_mic_menu.configure(values=["No microphones found"])
+            opts = [f"{i}: {d['name']}" for i, d in enumerate(sd.query_devices())
+                    if d["max_input_channels"] > 0]
+            self.wizard_mic_menu.configure(values=opts or ["No microphones found"])
+            self.wizard_mic_var.set(opts[0] if opts else "No microphones found")
         except Exception as e:
             self.wizard_mic_menu.configure(values=[f"Error: {e}"])
-
-    def _test_wizard_mic(self):
-        try:
-            import sounddevice as sd
-            import numpy as np
-            device_idx = int(self.wizard_mic_var.get().split(":")[0])
-            self.wizard_level_label.configure(text="Level: testing...", text_color="gray")
-            self.wizard_test_btn.configure(state="disabled")
-            def run():
-                try:
-                    def cb(indata, frames, time, status):
-                        level = float(np.linalg.norm(indata) / frames)
-                        db = 20 * (level and __import__('math').log10(max(level, 0.001)))
-                        color = "green" if db > -40 else "orange" if db > -60 else "red"
-                        self.after(0, lambda d=db, c=color: self.wizard_level_label.configure(
-                            text=f"Level: {d:.0f} dB", text_color=c))
-                    with sd.InputStream(device=device_idx, channels=1, samplerate=16000, callback=cb):
-                        import time as _t; _t.sleep(3)
-                except Exception as e:
-                    self.after(0, lambda err=e: messagebox.showerror("Mic Test Failed", str(err)))
-                finally:
-                    self.after(0, lambda: self.wizard_test_btn.configure(state="normal"))
-                    self.after(0, lambda: self.wizard_level_label.configure(text="Level: --", text_color="gray"))
-            threading.Thread(target=run, daemon=True).start()
-            messagebox.showinfo("Mic Test", "Speak for 3 seconds...")
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
 
     def _nav_buttons(self, parent, back=True, next_text="Next"):
         nav = ctk.CTkFrame(parent, fg_color="transparent")
@@ -195,8 +145,7 @@ class OnboardingWizard(ctk.CTkToplevel):
         if back:
             ctk.CTkButton(nav, text="Back", width=100, fg_color="gray",
                           command=lambda: self._show_step(self.step - 1)).pack(side="left")
-        ctk.CTkButton(nav, text=next_text, width=120,
-                      command=self._next_or_finish).pack(side="right")
+        ctk.CTkButton(nav, text=next_text, width=120, command=self._next_or_finish).pack(side="right")
 
     def _show_step(self, idx):
         for f in self.frames:
@@ -213,17 +162,16 @@ class OnboardingWizard(ctk.CTkToplevel):
     def _finish(self):
         mic_str = self.wizard_mic_var.get()
         try:
-            mic_idx = int(mic_str.split(":")[0])
+            mic_idx  = int(mic_str.split(":")[0])
             mic_name = mic_str.split(":", 1)[1].strip()
         except Exception:
-            mic_idx = 0
-            mic_name = mic_str
+            mic_idx, mic_name = 0, mic_str
         cfg = {
             "first_run_complete": True,
-            "device": self.chosen_device.get(),
+            "device":       self.chosen_device.get(),
             "compute_type": "float16" if self.chosen_device.get() == "cuda" else "int8",
-            "mic_index": mic_idx,
-            "mic_name": mic_name,
+            "mic_index":    mic_idx,
+            "mic_name":     mic_name,
         }
         save_config(cfg)
         self.grab_release()
@@ -231,9 +179,9 @@ class OnboardingWizard(ctk.CTkToplevel):
         self.on_complete(cfg)
 
 
-# ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 #  Epic Export Dialog
-# ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 class EpicExportDialog(ctk.CTkToplevel):
     def __init__(self, parent, transcript: str):
@@ -252,47 +200,36 @@ class EpicExportDialog(ctk.CTkToplevel):
                      font=ctk.CTkFont(size=12), text_color="gray").pack(pady=(0, 14))
         form = ctk.CTkFrame(self)
         form.pack(fill="x", padx=30, pady=4)
-        fields = [
-            ("Provider Name", "e.g., Dr. Smith"),
-            ("Patient Name",  "e.g., John Doe"),
-            ("Date of Birth", "e.g., 01/15/1970"),
-            ("MRN",           "e.g., 123456"),
-        ]
+        fields = [("Provider Name", "e.g., Dr. Smith"), ("Patient Name", "e.g., John Doe"),
+                  ("Date of Birth", "e.g., 01/15/1970"), ("MRN", "e.g., 123456")]
         self._entries: dict[str, ctk.CTkEntry] = {}
-        for row, (label, placeholder) in enumerate(fields):
-            ctk.CTkLabel(form, text=label, width=130, anchor="w").grid(
-                row=row, column=0, padx=(0, 10), pady=6, sticky="w")
-            entry = ctk.CTkEntry(form, width=260, placeholder_text=placeholder)
-            entry.grid(row=row, column=1, pady=6)
-            self._entries[label] = entry
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=30, pady=20)
-        ctk.CTkButton(btn_frame, text="Cancel", fg_color="gray", width=100,
-                      command=self.destroy).pack(side="left")
-        ctk.CTkButton(btn_frame, text="Copy to Epic Clipboard", width=220,
-                      command=self._export).pack(side="right")
+        for row, (label, ph) in enumerate(fields):
+            ctk.CTkLabel(form, text=label, width=130, anchor="w").grid(row=row, column=0, padx=(0, 10), pady=6, sticky="w")
+            e = ctk.CTkEntry(form, width=260, placeholder_text=ph)
+            e.grid(row=row, column=1, pady=6)
+            self._entries[label] = e
+        btn = ctk.CTkFrame(self, fg_color="transparent")
+        btn.pack(fill="x", padx=30, pady=20)
+        ctk.CTkButton(btn, text="Cancel", fg_color="gray", width=100, command=self.destroy).pack(side="left")
+        ctk.CTkButton(btn, text="Copy to Epic Clipboard", width=220, command=self._export).pack(side="right")
 
     def _export(self):
-        formatted = format_for_epic(
-            self.transcript,
-            provider_name=self._entries["Provider Name"].get().strip(),
-            patient_name=self._entries["Patient Name"].get().strip(),
-            dob=self._entries["Date of Birth"].get().strip(),
-            mrn=self._entries["MRN"].get().strip(),
-        )
-        saved_path = export_to_file(formatted)
-        copy_to_clipboard(formatted)
+        fmt  = format_for_epic(self.transcript,
+                               provider_name=self._entries["Provider Name"].get().strip(),
+                               patient_name=self._entries["Patient Name"].get().strip(),
+                               dob=self._entries["Date of Birth"].get().strip(),
+                               mrn=self._entries["MRN"].get().strip())
+        saved = export_to_file(fmt)
+        copy_to_clipboard(fmt)
         self.grab_release()
         self.destroy()
         messagebox.showinfo("Copied!",
-            f"Epic note copied to clipboard!\n\n"
-            f"1. Open Epic\n2. Open your note field\n3. Press Ctrl+V\n\n"
-            f"Also saved to:\n{saved_path}")
+            f"Epic note copied to clipboard!\n\n1. Open Epic\n2. Open your note\n3. Ctrl+V\n\nSaved to:\n{saved}")
 
 
-# ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 #  View Log Dialog
-# ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 class ViewLogDialog(ctk.CTkToplevel):
     def __init__(self, parent):
@@ -300,47 +237,76 @@ class ViewLogDialog(ctk.CTkToplevel):
         self.title("VoxChart Log")
         self.geometry("800x500")
         self.grab_set()
-        self._build_ui()
-
-    def _build_ui(self):
         ctk.CTkLabel(self, text="Recent Log (last 60 lines)",
                      font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(16, 4))
-        log_box = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Courier New", size=10))
-        log_box.pack(fill="both", expand=True, padx=16, pady=(0, 10))
-        log_box.insert("1.0", get_recent_log(60))
-        log_box.configure(state="disabled")
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=16, pady=(0, 16))
-        ctk.CTkButton(btn_frame, text="Refresh",
-                      command=lambda: (log_box.configure(state="normal"),
-                                       log_box.delete("1.0", "end"),
-                                       log_box.insert("1.0", get_recent_log(60)),
-                                       log_box.configure(state="disabled"))
-                      ).pack(side="left")
-        ctk.CTkButton(btn_frame, text="Open Log Folder",
-                      command=lambda: _open_log_folder()).pack(side="left", padx=8)
-        ctk.CTkButton(btn_frame, text="Close", fg_color="gray",
+        self._box = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Courier New", size=10))
+        self._box.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        self._refresh()
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkButton(row, text="Refresh", command=self._refresh).pack(side="left")
+        ctk.CTkButton(row, text="Open Log Folder",
+                      command=lambda: _open_folder(LOG_DIR)).pack(side="left", padx=8)
+        ctk.CTkButton(row, text="Close", fg_color="gray",
                       command=lambda: (self.grab_release(), self.destroy())).pack(side="right")
 
+    def _refresh(self):
+        self._box.configure(state="normal")
+        self._box.delete("1.0", "end")
+        self._box.insert("1.0", get_recent_log(60))
+        self._box.configure(state="disabled")
 
-def _open_log_folder():
-    from crash_reporter import LOG_DIR, _open_folder
-    _open_folder(LOG_DIR)
+
+# ---------------------------------------------------------------------------
+#  Save Template Dialog
+# ---------------------------------------------------------------------------
+
+class SaveTemplateDialog(ctk.CTkToplevel):
+    def __init__(self, parent, body: str):
+        super().__init__(parent)
+        self.title("Save Custom Template")
+        self.geometry("400x200")
+        self.resizable(False, False)
+        self.grab_set()
+        ctk.CTkLabel(self, text="Template Name:",
+                     font=ctk.CTkFont(size=14)).pack(pady=(24, 6))
+        self._entry = ctk.CTkEntry(self, width=320, placeholder_text="e.g., My Cardiology Note")
+        self._entry.pack(pady=6)
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(pady=16)
+        ctk.CTkButton(row, text="Cancel", fg_color="gray", width=100,
+                      command=lambda: (self.grab_release(), self.destroy())).pack(side="left", padx=8)
+        ctk.CTkButton(row, text="Save", width=100,
+                      command=lambda: self._save(body)).pack(side="right", padx=8)
+
+    def _save(self, body):
+        name = self._entry.get().strip()
+        if not name:
+            messagebox.showwarning("Name required", "Please enter a template name.")
+            return
+        add_custom_template(name, body)
+        messagebox.showinfo("Saved", f"Template '{name}' saved!")
+        self.grab_release()
+        self.destroy()
 
 
-# ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 #  Main App
-# ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 class MedicalDictationApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(f"VoxChart v{APP_VERSION}")
-        self.geometry("950x720")
-        self.output_file = DEFAULT_OUTPUT_FILE
-        self.is_recording = False
-        self.engine = None
-        logger.info("VoxChart %s starting up", APP_VERSION)
+        self.geometry("1100x740")
+        self.output_file     = DEFAULT_OUTPUT_FILE
+        self.is_recording    = False
+        self.engine          = None
+        self._session_id     = None
+        self._waveform_job   = None
+        self._update_banner  = None
+        init_db()
+        logger.info("VoxChart %s starting", APP_VERSION)
 
         cfg = load_config()
         if not cfg.get("first_run_complete"):
@@ -350,22 +316,52 @@ class MedicalDictationApp(ctk.CTk):
             self._init_engine(cfg)
             self.build_ui()
             self._bind_shortcuts()
-            if not shortcut_already_exists():
-                self.after(1500, self._auto_create_shortcut)
+            self._post_launch()
+
+    def _post_launch(self):
+        """Tasks that run after the window is shown."""
+        if not shortcut_already_exists():
+            self.after(1500, self._auto_create_shortcut)
+        # Check for updates silently
+        check_for_update(
+            APP_VERSION,
+            on_update_available=self._show_update_banner,
+        )
 
     def _auto_create_shortcut(self):
-        ok, msg = create_shortcut(silent=True)
+        ok, _ = create_shortcut(silent=True)
         if ok:
-            self.update_status("Desktop shortcut created automatically.")
+            self.update_status("Desktop shortcut created.")
+
+    def _show_update_banner(self, version: str, url: str):
+        """Called from background thread — schedule on main thread."""
+        self.after(0, lambda: self._build_update_banner(version, url))
+
+    def _build_update_banner(self, version: str, url: str):
+        if self._update_banner:
+            return  # already showing
+        banner = ctk.CTkFrame(self, fg_color="#1a4a1a", corner_radius=0)
+        banner.pack(fill="x", before=self.winfo_children()[0])
+        ctk.CTkLabel(banner,
+                     text=f"  ⬆  VoxChart {version} is available!",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color="#90ee90").pack(side="left", padx=10, pady=8)
+        ctk.CTkButton(banner, text="Open Release Page", width=160,
+                      fg_color="#2d7a2d", hover_color="#3a9e3a",
+                      command=lambda: webbrowser.open(url)).pack(side="left", padx=6, pady=8)
+        ctk.CTkButton(banner, text="Dismiss", width=80, fg_color="gray",
+                      command=lambda: (banner.destroy(), setattr(self, '_update_banner', None))
+                      ).pack(side="right", padx=10, pady=8)
+        self._update_banner = banner
 
     def _bind_shortcuts(self):
         self.bind("<Control-space>", lambda e: self.toggle_dictation())
-        self.bind("<Control-s>", lambda e: self.save_as())
-        self.bind("<Control-o>", lambda e: self.open_output_folder())
-        self.bind("<Control-e>", lambda e: self.copy_to_epic())
-        self.bind("<Escape>", lambda e: self._clear_transcript())
-        self.bind("<F1>", lambda e: self._show_shortcuts_help())
-        self.bind("<F5>", lambda e: self.refresh_mics())
+        self.bind("<Control-s>",     lambda e: self.save_as())
+        self.bind("<Control-o>",     lambda e: self.open_output_folder())
+        self.bind("<Control-e>",     lambda e: self.copy_to_epic())
+        self.bind("<Escape>",        lambda e: self._clear_transcript())
+        self.bind("<F1>",            lambda e: self._show_shortcuts_help())
+        self.bind("<F5>",            lambda e: self.refresh_mics())
 
     def _clear_transcript(self):
         if not self.is_recording:
@@ -374,15 +370,9 @@ class MedicalDictationApp(ctk.CTk):
 
     def _show_shortcuts_help(self):
         messagebox.showinfo("Keyboard Shortcuts",
-            "VoxChart Keyboard Shortcuts\n\n"
-            "Ctrl + Space   ->  Start / Stop Dictation\n"
-            "Ctrl + S       ->  Save As...\n"
-            "Ctrl + E       ->  Copy to Epic\n"
-            "Ctrl + O       ->  Open Output Folder\n"
-            "Esc            ->  Clear Transcript (when stopped)\n"
-            "F1             ->  Show This Help\n"
-            "F5             ->  Refresh Microphone List\n"
-        )
+            "Ctrl+Space  Start / Stop\nCtrl+S  Save As\n"
+            "Ctrl+E  Copy to Epic\nCtrl+O  Open Folder\n"
+            "Esc  Clear Transcript\nF1  This Help\nF5  Refresh Mics")
 
     def _run_wizard(self):
         OnboardingWizard(self, on_complete=self._wizard_done)
@@ -392,8 +382,7 @@ class MedicalDictationApp(ctk.CTk):
         self.build_ui()
         self._bind_shortcuts()
         self.deiconify()
-        if not shortcut_already_exists():
-            self.after(1500, self._auto_create_shortcut)
+        self._post_launch()
 
     def _init_engine(self, cfg):
         self.engine = DictationEngine(
@@ -403,149 +392,287 @@ class MedicalDictationApp(ctk.CTk):
             output_dir=OUTPUT_DIR,
             corpus_dir="training_corpus",
         )
-        self.engine.on_text_callback = self.append_transcript
+        self.engine.on_text_callback   = self.append_transcript
         self.engine.on_status_callback = self.update_status
         self._cfg = cfg
 
+    # -----------------------------------------------------------------------
+    #  UI construction
+    # -----------------------------------------------------------------------
+
     def build_ui(self):
-        cfg = self._cfg
-        device_label = "GPU (CUDA)" if cfg.get("device") == "cuda" else "CPU"
-        mic_name = cfg.get("mic_name", "Default")
+        cfg        = self._cfg
+        dev_label  = "GPU (CUDA)" if cfg.get("device") == "cuda" else "CPU"
+        mic_name   = cfg.get("mic_name", "Default")
 
         # Top bar
-        top_frame = ctk.CTkFrame(self, corner_radius=0)
-        top_frame.pack(fill="x", padx=10, pady=10)
+        top = ctk.CTkFrame(self, corner_radius=0)
+        top.pack(fill="x", padx=10, pady=(10, 0))
+
         self.status_label = ctk.CTkLabel(
-            top_frame,
-            text=f"Status: Ready  |  Device: {device_label}  |  Mic: {mic_name}  |  F1 = Shortcuts",
-            justify="left",
-        )
+            top,
+            text=f"Status: Ready  |  {dev_label}  |  Mic: {mic_name}  |  F1=Help",
+            justify="left")
         self.status_label.pack(side="left", padx=10, pady=10)
 
-        # Right-side top bar buttons (right to left)
+        # Top-bar buttons (right side)
         self.theme_var = ctk.StringVar(value="dark")
-        ctk.CTkOptionMenu(top_frame, values=["system", "light", "dark"],
-                          variable=self.theme_var, command=self.change_theme,
-                          width=120).pack(side="right", padx=10, pady=10)
-        ctk.CTkButton(top_frame, text="Re-run Setup", command=self._rerun_wizard,
+        ctk.CTkOptionMenu(top, values=["system", "light", "dark"],
+                          variable=self.theme_var, command=ctk.set_appearance_mode,
+                          width=110).pack(side="right", padx=10, pady=10)
+        ctk.CTkButton(top, text="Re-run Setup",  command=self._rerun_wizard,
                       width=110, fg_color="gray").pack(side="right", padx=(0, 6), pady=10)
-        ctk.CTkButton(
-            top_frame, text="Pin to Desktop",
-            command=self.create_shortcut_manual,
-            width=120, fg_color="#444", hover_color="#666",
-        ).pack(side="right", padx=(0, 6), pady=10)
-        # Report Bug button
-        ctk.CTkButton(
-            top_frame,
-            text="Report Bug",
-            command=self.open_bug_report,
-            width=110,
-            fg_color="#7a1a1a",
-            hover_color="#b02020",
-        ).pack(side="right", padx=(0, 6), pady=10)
-        # View Log button
-        ctk.CTkButton(
-            top_frame,
-            text="View Log",
-            command=self.open_view_log,
-            width=90,
-            fg_color="#333",
-            hover_color="#555",
-        ).pack(side="right", padx=(0, 6), pady=10)
+        ctk.CTkButton(top, text="Pin to Desktop", command=self.create_shortcut_manual,
+                      width=120, fg_color="#444").pack(side="right", padx=(0, 6), pady=10)
+        ctk.CTkButton(top, text="Report Bug",    command=self.open_bug_report,
+                      width=110, fg_color="#7a1a1a", hover_color="#b02020"
+                      ).pack(side="right", padx=(0, 6), pady=10)
+        ctk.CTkButton(top, text="View Log",      command=self.open_view_log,
+                      width=90,  fg_color="#333").pack(side="right", padx=(0, 6), pady=10)
 
-        # Main area
-        main_frame = ctk.CTkFrame(self)
-        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        transcript_frame = ctk.CTkFrame(main_frame)
-        transcript_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        ctk.CTkLabel(transcript_frame, text="Live Transcript",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=10, pady=(10, 5))
-        self.transcript_text = ctk.CTkTextbox(transcript_frame,
-                                               font=ctk.CTkFont(family="Courier", size=13), wrap="word")
-        self.transcript_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        # Body: sidebar + main
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=10, pady=6)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        # -- Session History sidebar --
+        self._build_sidebar(body)
+
+        # -- Main panel --
+        main = ctk.CTkFrame(body)
+        main.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        main.rowconfigure(0, weight=1)
+        main.columnconfigure(0, weight=1)
+
+        # Transcript
+        tx_frame = ctk.CTkFrame(main)
+        tx_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        tx_frame.rowconfigure(1, weight=1)
+        tx_frame.columnconfigure(0, weight=1)
+
+        hdr = ctk.CTkFrame(tx_frame, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
+        ctk.CTkLabel(hdr, text="Live Transcript",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
+
+        # Waveform canvas
+        self._wave_canvas = ctk.CTkCanvas(hdr, width=140, height=28,
+                                           bg="#1a1a2e", highlightthickness=0)
+        self._wave_canvas.pack(side="right", padx=8)
+        self._wave_bars  = []
+        self._wave_level = 0.0
+        self._init_wave_canvas()
+
+        self.transcript_text = ctk.CTkTextbox(
+            tx_frame, font=ctk.CTkFont(family="Courier", size=13), wrap="word")
+        self.transcript_text.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
 
         # Controls row
-        controls_frame = ctk.CTkFrame(main_frame)
-        controls_frame.pack(fill="x", padx=10, pady=(0, 10))
-        self.start_stop_button = ctk.CTkButton(
-            controls_frame, text="Start  (Ctrl+Space)",
-            command=self.toggle_dictation, height=40,
-            font=ctk.CTkFont(size=14, weight="bold"),
-        )
-        self.start_stop_button.pack(side="left", padx=10, pady=10)
-        ctk.CTkButton(controls_frame, text="Save As  (Ctrl+S)",
-                      command=self.save_as, height=40).pack(side="left", padx=6, pady=10)
-        ctk.CTkButton(
-            controls_frame, text="Copy to Epic  (Ctrl+E)",
-            command=self.copy_to_epic, height=40,
-            fg_color="#1a6b3c", hover_color="#23994f",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(side="left", padx=6, pady=10)
-        ctk.CTkButton(controls_frame, text="Clear  (Esc)",
-                      command=self._clear_transcript, height=40,
-                      fg_color="gray").pack(side="left", padx=6, pady=10)
-        ctk.CTkButton(controls_frame, text="Manage Medical Terms",
-                      command=self.open_terms_manager, height=40).pack(side="left", padx=6, pady=10)
-        ctk.CTkButton(controls_frame, text="Shortcuts  (F1)",
-                      command=self._show_shortcuts_help, height=40,
-                      fg_color="gray").pack(side="right", padx=10, pady=10)
+        ctrl = ctk.CTkFrame(main)
+        ctrl.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
 
+        self.start_stop_button = ctk.CTkButton(
+            ctrl, text="Start  (Ctrl+Space)", command=self.toggle_dictation,
+            height=40, font=ctk.CTkFont(size=14, weight="bold"))
+        self.start_stop_button.pack(side="left", padx=10, pady=10)
+
+        ctk.CTkButton(ctrl, text="Save As  (Ctrl+S)", command=self.save_as,
+                      height=40).pack(side="left", padx=6, pady=10)
+        ctk.CTkButton(ctrl, text="Copy to Epic  (Ctrl+E)", command=self.copy_to_epic,
+                      height=40, fg_color="#1a6b3c", hover_color="#23994f",
+                      font=ctk.CTkFont(size=13, weight="bold")
+                      ).pack(side="left", padx=6, pady=10)
+        ctk.CTkButton(ctrl, text="Clear  (Esc)", command=self._clear_transcript,
+                      height=40, fg_color="gray").pack(side="left", padx=6, pady=10)
+        ctk.CTkButton(ctrl, text="Medical Terms", command=self.open_terms_manager,
+                      height=40).pack(side="left", padx=6, pady=10)
+
+        # Template dropdown
+        tmpl_names = list(all_templates().keys())
+        self._tmpl_var = ctk.StringVar(value="Insert Template...")
+        ctk.CTkOptionMenu(
+            ctrl, values=tmpl_names, variable=self._tmpl_var,
+            command=self._insert_template, width=170, height=40
+        ).pack(side="left", padx=6, pady=10)
+        ctk.CTkButton(ctrl, text="Save as Template", command=self._save_current_as_template,
+                      height=40, fg_color="#444").pack(side="left", padx=6, pady=10)
+
+        ctk.CTkButton(ctrl, text="Shortcuts  (F1)", command=self._show_shortcuts_help,
+                      height=40, fg_color="gray").pack(side="right", padx=10, pady=10)
+
+        # Mic row
         self.build_mic_settings(cfg.get("mic_index", 0))
 
-        info_frame = ctk.CTkFrame(self)
-        info_frame.pack(fill="x", padx=10, pady=(0, 10))
-        ctk.CTkLabel(info_frame, text=f"Output: {os.path.abspath(self.output_file)}",
-                     justify="left").pack(side="left", padx=10, pady=10)
-        ctk.CTkButton(info_frame, text="Open Folder  (Ctrl+O)",
-                      command=self.open_output_folder, width=180).pack(side="right", padx=10, pady=10)
+        # Footer
+        foot = ctk.CTkFrame(self)
+        foot.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkLabel(foot, text=f"Output: {os.path.abspath(self.output_file)}",
+                     justify="left").pack(side="left", padx=10, pady=8)
+        ctk.CTkButton(foot, text="Open Folder  (Ctrl+O)",
+                      command=self.open_output_folder, width=180).pack(side="right", padx=10, pady=8)
+
+    # -- Sidebar --
+
+    def _build_sidebar(self, parent):
+        self._sidebar_visible = True
+        self._sidebar = ctk.CTkFrame(parent, width=220)
+        self._sidebar.grid(row=0, column=0, sticky="nsew")
+        self._sidebar.grid_propagate(False)
+        self._sidebar.rowconfigure(1, weight=1)
+
+        hdr = ctk.CTkFrame(self._sidebar, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=6, pady=(8, 0))
+        ctk.CTkLabel(hdr, text="Session History",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        ctk.CTkButton(hdr, text="\u00d7", width=28, height=28, fg_color="#333",
+                      command=self._toggle_sidebar).pack(side="right")
+
+        self._session_scroll = ctk.CTkScrollableFrame(self._sidebar)
+        self._session_scroll.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+
+        ctk.CTkButton(self._sidebar, text="+ New Session",
+                      command=self._clear_transcript, fg_color="#333", height=30
+                      ).grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 8))
+
+        self._refresh_session_list()
+
+        # Show/hide toggle button (visible when sidebar hidden)
+        self._sidebar_toggle_btn = ctk.CTkButton(
+            parent, text="\u2630 History", width=90, height=28, fg_color="#333",
+            command=self._toggle_sidebar)
+        # not packed yet — only shows when sidebar hidden
+
+    def _toggle_sidebar(self):
+        if self._sidebar_visible:
+            self._sidebar.grid_remove()
+            self._sidebar_toggle_btn.grid(row=0, column=0, sticky="nw", padx=(0, 4))
+        else:
+            self._sidebar_toggle_btn.grid_remove()
+            self._sidebar.grid()
+        self._sidebar_visible = not self._sidebar_visible
+
+    def _refresh_session_list(self):
+        for w in self._session_scroll.winfo_children():
+            w.destroy()
+        sessions = list_sessions(50)
+        if not sessions:
+            ctk.CTkLabel(self._session_scroll, text="No sessions yet.",
+                         text_color="gray", font=ctk.CTkFont(size=11)).pack(pady=20)
+            return
+        for s in sessions:
+            self._build_session_row(s)
+
+    def _build_session_row(self, s: dict):
+        row = ctk.CTkFrame(self._session_scroll, fg_color="#222", corner_radius=6)
+        row.pack(fill="x", padx=4, pady=3)
+        dt  = s["started_at"][:16].replace("T", " ")
+        dur = f"{int(s['duration_sec'] or 0)}s" if s.get("duration_sec") else "--"
+        wc  = str(s.get("word_count") or 0) + "w"
+        lbl_text = f"{dt}\n{dur}  {wc}"
+        btn = ctk.CTkButton(row, text=lbl_text, anchor="w", fg_color="transparent",
+                            hover_color="#333", font=ctk.CTkFont(size=10),
+                            command=lambda sid=s["id"], fp=s.get("file_path", ""): self._load_session(sid, fp))
+        btn.pack(side="left", fill="x", expand=True, padx=4, pady=4)
+        ctk.CTkButton(row, text="\u2715", width=24, height=24, fg_color="#5a1a1a",
+                      hover_color="#8a2020",
+                      command=lambda sid=s["id"]: self._delete_session(sid)
+                      ).pack(side="right", padx=(0, 4))
+
+    def _load_session(self, session_id: int, file_path: str):
+        text = read_transcript(file_path)
+        self.transcript_text.delete("1.0", "end")
+        self.transcript_text.insert("1.0", text or "[Session file not found]")
+        self.update_status(f"Loaded session #{session_id}")
+
+    def _delete_session(self, session_id: int):
+        if messagebox.askyesno("Delete Session", f"Delete session #{session_id}?"):
+            delete_session(session_id)
+            self._refresh_session_list()
+
+    # -- Waveform --
+
+    def _init_wave_canvas(self):
+        """Draw 14 static bars on the canvas."""
+        self._wave_canvas.delete("all")
+        self._wave_bars = []
+        n, w, h = 14, 140, 28
+        bar_w   = (w - (n + 1) * 2) // n
+        for i in range(n):
+            x1 = 2 + i * (bar_w + 2)
+            x2 = x1 + bar_w
+            bar = self._wave_canvas.create_rectangle(x1, h // 2, x2, h // 2,
+                                                     fill="#2b7cff", outline="")
+            self._wave_bars.append((x1, x2, bar))
+
+    def _start_waveform(self):
+        self._wave_active = True
+        self._animate_wave()
+
+    def _stop_waveform(self):
+        self._wave_active = False
+        self._init_wave_canvas()  # reset to flat
+
+    def _animate_wave(self):
+        if not getattr(self, "_wave_active", False):
+            return
+        import random
+        level = self._wave_level
+        n, h  = len(self._wave_bars), 28
+        center = h // 2
+        for i, (x1, x2, bar) in enumerate(self._wave_bars):
+            # Each bar gets a slightly randomised height based on current level
+            amp = int(center * level * (0.4 + 0.6 * random.random()))
+            amp = max(2, min(amp, center - 1))
+            color = "#d93025" if level > 0.8 else "#f0a500" if level > 0.5 else "#2ecc71"
+            self._wave_canvas.coords(bar, x1, center - amp, x2, center + amp)
+            self._wave_canvas.itemconfig(bar, fill=color)
+        self._waveform_job = self.after(33, self._animate_wave)  # ~30fps
+
+    def _update_wave_level(self, level: float):
+        """Called from audio callback thread."""
+        self._wave_level = max(0.0, min(1.0, level))
+
+    # -- Mic settings row --
 
     def build_mic_settings(self, default_idx=0):
         mic_frame = ctk.CTkFrame(self)
-        mic_frame.pack(fill="x", padx=10, pady=(0, 5))
-        ctk.CTkLabel(mic_frame, text="Microphone:").pack(side="left", padx=(10, 5), pady=10)
-        self.mic_var = ctk.StringVar()
+        mic_frame.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(mic_frame, text="Microphone:").pack(side="left", padx=(10, 5), pady=8)
+        self.mic_var  = ctk.StringVar()
         self.mic_menu = ctk.CTkOptionMenu(mic_frame, variable=self.mic_var, width=260)
-        self.mic_menu.pack(side="left", padx=5, pady=10)
-        ctk.CTkButton(mic_frame, text="Refresh (F5)", command=self.refresh_mics,
-                      width=100).pack(side="left", padx=5, pady=10)
-        self.test_mic_btn = ctk.CTkButton(mic_frame, text="Test Mic",
-                                          command=self.test_microphone, width=90)
-        self.test_mic_btn.pack(side="left", padx=5, pady=10)
-        self.mic_level_label = ctk.CTkLabel(mic_frame, text="Level: --", width=120, anchor="w")
-        self.mic_level_label.pack(side="left", padx=10, pady=10)
+        self.mic_menu.pack(side="left", padx=5, pady=8)
+        ctk.CTkButton(mic_frame, text="Refresh (F5)", command=self.refresh_mics, width=100).pack(side="left", padx=5)
+        self.test_mic_btn = ctk.CTkButton(mic_frame, text="Test Mic", command=self.test_microphone, width=90)
+        self.test_mic_btn.pack(side="left", padx=5)
+        self.mic_level_label = ctk.CTkLabel(mic_frame, text="Level: --", width=100, anchor="w")
+        self.mic_level_label.pack(side="left", padx=8)
         self.refresh_mics(select_idx=default_idx)
 
     def refresh_mics(self, select_idx=None):
         try:
             import sounddevice as sd
-            devices = sd.query_devices()
-            opts = [f"{i}: {d['name']}" for i, d in enumerate(devices) if d["max_input_channels"] > 0]
-            if opts:
-                self.mic_menu.configure(values=opts)
-                match = next((o for o in opts if o.startswith(f"{select_idx}:")), opts[0]) if select_idx is not None else opts[0]
-                self.mic_var.set(match)
-            else:
-                self.mic_menu.configure(values=["No microphones found"])
-                self.mic_var.set("No microphones found")
+            opts = [f"{i}: {d['name']}" for i, d in enumerate(sd.query_devices())
+                    if d["max_input_channels"] > 0]
+            self.mic_menu.configure(values=opts or ["No microphones found"])
+            match = next((o for o in opts if o.startswith(f"{select_idx}:")), opts[0] if opts else "")
+            self.mic_var.set(match)
         except Exception as e:
             self.mic_menu.configure(values=[f"Error: {e}"])
 
     def test_microphone(self):
         try:
-            import sounddevice as sd
-            import numpy as np
+            import sounddevice as sd, numpy as np
             device_idx = int(self.mic_var.get().split(":")[0])
-            self.mic_level_label.configure(text="Level: testing...", text_color="gray")
             self.test_mic_btn.configure(state="disabled")
             def run():
                 try:
                     def cb(indata, frames, time, status):
                         level = float(np.linalg.norm(indata) / frames)
-                        import math
-                        db = 20 * math.log10(max(level, 0.001))
+                        db    = 20 * math.log10(max(level, 0.001))
                         color = "green" if db > -40 else "orange" if db > -60 else "red"
-                        self.after(0, lambda d=db, c=color: self.mic_level_label.configure(
-                            text=f"Level: {d:.0f} dB", text_color=c))
+                        self.after(0, lambda d=db, c=color:
+                                   self.mic_level_label.configure(text=f"Level: {d:.0f} dB", text_color=c))
                     with sd.InputStream(device=device_idx, channels=1, samplerate=16000, callback=cb):
                         import time as _t; _t.sleep(3)
                 except Exception as e:
@@ -554,9 +681,101 @@ class MedicalDictationApp(ctk.CTk):
                     self.after(0, lambda: self.test_mic_btn.configure(state="normal"))
                     self.after(0, lambda: self.mic_level_label.configure(text="Level: --", text_color="white"))
             threading.Thread(target=run, daemon=True).start()
-            messagebox.showinfo("Mic Test", "Speak into your microphone for 3 seconds...")
+            messagebox.showinfo("Mic Test", "Speak for 3 seconds...")
         except Exception as e:
             messagebox.showerror("Error", str(e))
+
+    # -- Templates --
+
+    def _insert_template(self, name: str):
+        body = get_template(name)
+        if not body:
+            return
+        if self.transcript_text.get("1.0", "end-1c").strip():
+            if not messagebox.askyesno("Insert Template",
+                                       "Replace current transcript with template?"):
+                return
+        self.transcript_text.delete("1.0", "end")
+        self.transcript_text.insert("1.0", body)
+        self._tmpl_var.set("Insert Template...")
+        self.update_status(f"Template inserted: {name}")
+
+    def _save_current_as_template(self):
+        body = self.transcript_text.get("1.0", "end-1c").strip()
+        if not body:
+            messagebox.showwarning("Empty", "Nothing in the transcript to save as a template.")
+            return
+        SaveTemplateDialog(self, body)
+
+    # -- Dictation --
+
+    def toggle_dictation(self):
+        if not self.is_recording:
+            Path(self.output_file).parent.mkdir(parents=True, exist_ok=True)
+            self.start_stop_button.configure(text="Stop  (Ctrl+Space)", fg_color="#d93025")
+            self.transcript_text.insert("end",
+                f"\n--- Session started {datetime.now().strftime('%H:%M:%S')} ---\n")
+            self._session_id = start_session(self.output_file)
+            self.engine.start(self.output_file)
+            self.is_recording = True
+            self._start_waveform()
+            self._attach_audio_level_hook()
+            logger.info("Dictation started (session %s)", self._session_id)
+        else:
+            self.engine.stop()
+            self._stop_waveform()
+            self.start_stop_button.configure(text="Start  (Ctrl+Space)", fg_color="#2b7cff")
+            self.transcript_text.insert("end",
+                f"\n--- Session stopped {datetime.now().strftime('%H:%M:%S')} ---\n")
+            transcript = self.transcript_text.get("1.0", "end-1c")
+            if self._session_id:
+                stop_session(self._session_id, transcript)
+                self._session_id = None
+            self.is_recording = False
+            self.after(300, self._refresh_session_list)
+            logger.info("Dictation stopped")
+
+    def _attach_audio_level_hook(self):
+        """Monkey-patch the engine's sd callback to also feed wave level."""
+        original_cb = self.engine.sd_callback if hasattr(self.engine, "sd_callback") else None
+        engine = self.engine
+        app    = self
+        import numpy as np
+        orig = engine._sd_callback if hasattr(engine, "_sd_callback") else None
+
+        def patched_cb(indata, frames, time, status):
+            if orig:
+                orig(indata, frames, time, status)
+            level = float(np.linalg.norm(indata) / max(frames, 1))
+            app._update_wave_level(min(level * 8, 1.0))
+
+        # Attach to engine stream after a short delay (stream may not exist yet)
+        def _hook():
+            if engine.stream:
+                engine.stream.callback = patched_cb
+        self.after(200, _hook)
+
+    # -- Misc actions --
+
+    def copy_to_epic(self):
+        transcript = self.transcript_text.get("1.0", "end-1c").strip()
+        if not transcript:
+            messagebox.showwarning("No Transcript", "Dictate something first!")
+            return
+        EpicExportDialog(self, transcript)
+
+    def create_shortcut_manual(self):
+        ok, msg = create_shortcut(silent=False)
+        if ok:
+            messagebox.showinfo("Shortcut Created", "Desktop shortcut created!")
+        else:
+            messagebox.showerror("Shortcut Failed", f"{msg}")
+
+    def open_bug_report(self):
+        BugReportDialog(parent=self)
+
+    def open_view_log(self):
+        ViewLogDialog(self)
 
     def _rerun_wizard(self):
         cfg = load_config()
@@ -564,47 +783,6 @@ class MedicalDictationApp(ctk.CTk):
         save_config(cfg)
         self.withdraw()
         OnboardingWizard(self, on_complete=self._wizard_done)
-
-    def change_theme(self, choice: str):
-        ctk.set_appearance_mode(choice)
-
-    def toggle_dictation(self):
-        if not self.is_recording:
-            Path(self.output_file).parent.mkdir(parents=True, exist_ok=True)
-            self.start_stop_button.configure(text="Stop  (Ctrl+Space)", fg_color="#d93025")
-            self.transcript_text.insert("end", f"\n--- Session started {datetime.now().strftime('%H:%M:%S')} ---\n")
-            self.engine.start(self.output_file)
-            self.is_recording = True
-            logger.info("Dictation session started")
-        else:
-            self.engine.stop()
-            self.start_stop_button.configure(text="Start  (Ctrl+Space)", fg_color="#2b7cff")
-            self.transcript_text.insert("end", f"\n--- Session stopped {datetime.now().strftime('%H:%M:%S')} ---\n")
-            self.is_recording = False
-            logger.info("Dictation session stopped")
-
-    def copy_to_epic(self):
-        transcript = self.transcript_text.get("1.0", "end-1c").strip()
-        if not transcript:
-            messagebox.showwarning("No Transcript", "Nothing to export. Dictate something first!")
-            return
-        EpicExportDialog(self, transcript)
-
-    def create_shortcut_manual(self):
-        ok, msg = create_shortcut(silent=False)
-        if ok:
-            messagebox.showinfo("Shortcut Created",
-                "Desktop shortcut created successfully!\n\n"
-                "You can now launch VoxChart directly from your desktop.")
-        else:
-            messagebox.showerror("Shortcut Failed", f"Could not create shortcut:\n{msg}")
-
-    def open_bug_report(self):
-        logger.info("User opened bug report dialog")
-        BugReportDialog(parent=self)
-
-    def open_view_log(self):
-        ViewLogDialog(self)
 
     def append_transcript(self, text: str):
         self.after(0, lambda t=text: self._safe_append(t))
@@ -620,92 +798,86 @@ class MedicalDictationApp(ctk.CTk):
         fp = filedialog.asksaveasfilename(
             defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-            initialfile="chart_note.txt", title="Save Chart Note As...",
-        )
+            initialfile="chart_note.txt", title="Save Chart Note As...")
         if not fp:
             return
         try:
             Path(fp).write_text(self.transcript_text.get("1.0", "end-1c"), encoding="utf-8")
-            messagebox.showinfo("Saved", f"Chart note saved to {fp}")
+            messagebox.showinfo("Saved", f"Saved to {fp}")
         except Exception as e:
-            messagebox.showerror("Error", f"Could not save file: {e}")
+            messagebox.showerror("Error", str(e))
 
     def open_output_folder(self):
         folder = os.path.abspath(OUTPUT_DIR)
         system = platform.system()
-        if system == "Windows":
-            os.startfile(folder)
-        elif system == "Darwin":
-            subprocess.Popen(["open", folder])
-        else:
-            subprocess.Popen(["xdg-open", folder])
+        if system == "Windows":  os.startfile(folder)
+        elif system == "Darwin": subprocess.Popen(["open", folder])
+        else:                    subprocess.Popen(["xdg-open", folder])
 
     def open_terms_manager(self):
         TermsManagerWindow(self)
 
 
-# ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 #  Medical Terms Manager
-# ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 class TermsManagerWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Manage Medical Terms")
         self.geometry("700x500")
-        self.build_ui()
+        self._build_ui()
 
-    def build_ui(self):
-        ctk.CTkLabel(self, text="Add/Edit Medical Terms",
+    def _build_ui(self):
+        ctk.CTkLabel(self, text="Add / Edit Medical Terms",
                      font=ctk.CTkFont(size=16, weight="bold")).pack(pady=10)
-        form_frame = ctk.CTkFrame(self)
-        form_frame.pack(fill="x", padx=10, pady=10)
-        ctk.CTkLabel(form_frame, text="Correct Term (e.g., metformin)").grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        self.term_entry = ctk.CTkEntry(form_frame, width=300)
-        self.term_entry.grid(row=0, column=1, padx=10, pady=5)
-        ctk.CTkLabel(form_frame, text="Common Misrecognition (e.g., met four min)").grid(row=1, column=0, padx=10, pady=5, sticky="w")
-        self.mis_entry = ctk.CTkEntry(form_frame, width=300)
-        self.mis_entry.grid(row=1, column=1, padx=10, pady=5)
-        ctk.CTkLabel(form_frame, text="Category (medication/diagnosis/procedure)").grid(row=2, column=0, padx=10, pady=5, sticky="w")
-        self.cat_entry = ctk.CTkEntry(form_frame, width=300)
-        self.cat_entry.grid(row=2, column=1, padx=10, pady=5)
-        ctk.CTkButton(self, text="Add Term", command=self.add_term).pack(pady=10)
-        ctk.CTkLabel(self,
-                     text="Tip: Run build_medical_db.py once to create the DB, then use this UI to add more terms.",
-                     justify="left", text_color="gray").pack(padx=10, pady=(0, 10))
+        form = ctk.CTkFrame(self)
+        form.pack(fill="x", padx=10, pady=10)
+        fields = [
+            ("Correct Term",        "e.g., metformin"),
+            ("Common Misrecognition", "e.g., met four min"),
+            ("Category",            "medication / diagnosis / procedure"),
+        ]
+        self._entries: dict = {}
+        for row, (label, ph) in enumerate(fields):
+            ctk.CTkLabel(form, text=label, width=220, anchor="w").grid(row=row, column=0, padx=10, pady=5, sticky="w")
+            e = ctk.CTkEntry(form, width=300, placeholder_text=ph)
+            e.grid(row=row, column=1, padx=10, pady=5)
+            self._entries[label] = e
+        ctk.CTkButton(self, text="Add Term", command=self._add_term).pack(pady=10)
+        ctk.CTkLabel(self, text="Tip: Run build_medical_db.py once to create the DB first.",
+                     text_color="gray").pack(padx=10)
 
-    def add_term(self):
-        term = self.term_entry.get().strip()
-        mis = self.mis_entry.get().strip()
-        cat = self.cat_entry.get().strip()
+    def _add_term(self):
+        term = self._entries["Correct Term"].get().strip()
+        mis  = self._entries["Common Misrecognition"].get().strip()
+        cat  = self._entries["Category"].get().strip()
         if not term:
-            messagebox.showwarning("Missing Field", "Correct Term is required.")
+            messagebox.showwarning("Missing", "Correct Term is required.")
             return
         import sqlite3
-        db_path = Path("medical_terms.db")
-        if not db_path.exists():
+        db = Path("medical_terms.db")
+        if not db.exists():
             messagebox.showerror("DB Missing", "Run build_medical_db.py first.")
             return
-        conn = sqlite3.connect(str(db_path))
-        cur = conn.cursor()
+        conn = sqlite3.connect(str(db))
         try:
-            cur.execute(
+            conn.execute(
                 "INSERT INTO terms (term, category, common_misrecognition) VALUES (?, ?, ?)",
-                (term.lower(), cat or None, mis.lower() if mis else None),
-            )
+                (term.lower(), cat or None, mis.lower() if mis else None))
             conn.commit()
-            messagebox.showinfo("Success", f"Added term: {term}")
-            self.term_entry.delete(0, "end")
-            self.mis_entry.delete(0, "end")
-            self.cat_entry.delete(0, "end")
+            messagebox.showinfo("Added", f"Added: {term}")
+            for e in self._entries.values():
+                e.delete(0, "end")
         except sqlite3.IntegrityError:
-            messagebox.showwarning("Duplicate", "This term already exists.")
+            messagebox.showwarning("Duplicate", "Term already exists.")
         finally:
             conn.close()
 
 
 if __name__ == "__main__":
-    logger.info("Launching VoxChart main window")
+    logger.info("Launching VoxChart %s", APP_VERSION)
     app = MedicalDictationApp()
     app.mainloop()
     logger.info("VoxChart exited cleanly")
