@@ -12,13 +12,21 @@ import customtkinter as ctk
 from dictation_engine import DictationEngine
 from epic_exporter import format_for_epic, copy_to_clipboard, export_to_file
 from shortcut_utils import create_shortcut, shortcut_already_exists
+from crash_reporter import setup_logging, install_exception_hook, BugReportDialog, get_recent_log
+
+# ── Bootstrap: logging + crash hook installed before anything else ─────────────
+setup_logging()
+install_exception_hook()
+
+import logging
+logger = logging.getLogger("voxchart.app")
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
 OUTPUT_DIR = "chart_notes"
 DEFAULT_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "chart_note.txt")
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 CONFIG_FILE = Path("voxchart_config.json")
 
 
@@ -46,9 +54,9 @@ def detect_gpu():
     return False, None
 
 
-# ──────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 #  First-Run Onboarding Wizard
-# ──────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 
 class OnboardingWizard(ctk.CTkToplevel):
     def __init__(self, parent, on_complete):
@@ -223,9 +231,9 @@ class OnboardingWizard(ctk.CTkToplevel):
         self.on_complete(cfg)
 
 
-# ──────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 #  Epic Export Dialog
-# ──────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 
 class EpicExportDialog(ctk.CTkToplevel):
     def __init__(self, parent, transcript: str):
@@ -282,9 +290,47 @@ class EpicExportDialog(ctk.CTkToplevel):
             f"Also saved to:\n{saved_path}")
 
 
-# ──────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
+#  View Log Dialog
+# ────────────────────────────────────────────────────────────
+
+class ViewLogDialog(ctk.CTkToplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("VoxChart Log")
+        self.geometry("800x500")
+        self.grab_set()
+        self._build_ui()
+
+    def _build_ui(self):
+        ctk.CTkLabel(self, text="Recent Log (last 60 lines)",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(16, 4))
+        log_box = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Courier New", size=10))
+        log_box.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        log_box.insert("1.0", get_recent_log(60))
+        log_box.configure(state="disabled")
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkButton(btn_frame, text="Refresh",
+                      command=lambda: (log_box.configure(state="normal"),
+                                       log_box.delete("1.0", "end"),
+                                       log_box.insert("1.0", get_recent_log(60)),
+                                       log_box.configure(state="disabled"))
+                      ).pack(side="left")
+        ctk.CTkButton(btn_frame, text="Open Log Folder",
+                      command=lambda: _open_log_folder()).pack(side="left", padx=8)
+        ctk.CTkButton(btn_frame, text="Close", fg_color="gray",
+                      command=lambda: (self.grab_release(), self.destroy())).pack(side="right")
+
+
+def _open_log_folder():
+    from crash_reporter import LOG_DIR, _open_folder
+    _open_folder(LOG_DIR)
+
+
+# ────────────────────────────────────────────────────────────
 #  Main App
-# ──────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 
 class MedicalDictationApp(ctk.CTk):
     def __init__(self):
@@ -294,6 +340,7 @@ class MedicalDictationApp(ctk.CTk):
         self.output_file = DEFAULT_OUTPUT_FILE
         self.is_recording = False
         self.engine = None
+        logger.info("VoxChart %s starting up", APP_VERSION)
 
         cfg = load_config()
         if not cfg.get("first_run_complete"):
@@ -303,7 +350,6 @@ class MedicalDictationApp(ctk.CTk):
             self._init_engine(cfg)
             self.build_ui()
             self._bind_shortcuts()
-            # Auto-create shortcut silently if never done before
             if not shortcut_already_exists():
                 self.after(1500, self._auto_create_shortcut)
 
@@ -375,20 +421,36 @@ class MedicalDictationApp(ctk.CTk):
             justify="left",
         )
         self.status_label.pack(side="left", padx=10, pady=10)
+
+        # Right-side top bar buttons (right to left)
         self.theme_var = ctk.StringVar(value="dark")
         ctk.CTkOptionMenu(top_frame, values=["system", "light", "dark"],
                           variable=self.theme_var, command=self.change_theme,
                           width=120).pack(side="right", padx=10, pady=10)
         ctk.CTkButton(top_frame, text="Re-run Setup", command=self._rerun_wizard,
                       width=110, fg_color="gray").pack(side="right", padx=(0, 6), pady=10)
-        # Create Shortcut button
+        ctk.CTkButton(
+            top_frame, text="Pin to Desktop",
+            command=self.create_shortcut_manual,
+            width=120, fg_color="#444", hover_color="#666",
+        ).pack(side="right", padx=(0, 6), pady=10)
+        # Report Bug button
         ctk.CTkButton(
             top_frame,
-            text="Pin to Desktop",
-            command=self.create_shortcut_manual,
-            width=120,
-            fg_color="#444",
-            hover_color="#666",
+            text="Report Bug",
+            command=self.open_bug_report,
+            width=110,
+            fg_color="#7a1a1a",
+            hover_color="#b02020",
+        ).pack(side="right", padx=(0, 6), pady=10)
+        # View Log button
+        ctk.CTkButton(
+            top_frame,
+            text="View Log",
+            command=self.open_view_log,
+            width=90,
+            fg_color="#333",
+            hover_color="#555",
         ).pack(side="right", padx=(0, 6), pady=10)
 
         # Main area
@@ -513,11 +575,13 @@ class MedicalDictationApp(ctk.CTk):
             self.transcript_text.insert("end", f"\n--- Session started {datetime.now().strftime('%H:%M:%S')} ---\n")
             self.engine.start(self.output_file)
             self.is_recording = True
+            logger.info("Dictation session started")
         else:
             self.engine.stop()
             self.start_stop_button.configure(text="Start  (Ctrl+Space)", fg_color="#2b7cff")
             self.transcript_text.insert("end", f"\n--- Session stopped {datetime.now().strftime('%H:%M:%S')} ---\n")
             self.is_recording = False
+            logger.info("Dictation session stopped")
 
     def copy_to_epic(self):
         transcript = self.transcript_text.get("1.0", "end-1c").strip()
@@ -527,14 +591,20 @@ class MedicalDictationApp(ctk.CTk):
         EpicExportDialog(self, transcript)
 
     def create_shortcut_manual(self):
-        """Manually triggered from the Pin to Desktop button."""
         ok, msg = create_shortcut(silent=False)
         if ok:
             messagebox.showinfo("Shortcut Created",
-                f"Desktop shortcut created successfully!\n\n"
-                f"You can now launch VoxChart directly from your desktop.")
+                "Desktop shortcut created successfully!\n\n"
+                "You can now launch VoxChart directly from your desktop.")
         else:
             messagebox.showerror("Shortcut Failed", f"Could not create shortcut:\n{msg}")
+
+    def open_bug_report(self):
+        logger.info("User opened bug report dialog")
+        BugReportDialog(parent=self)
+
+    def open_view_log(self):
+        ViewLogDialog(self)
 
     def append_transcript(self, text: str):
         self.after(0, lambda t=text: self._safe_append(t))
@@ -574,9 +644,9 @@ class MedicalDictationApp(ctk.CTk):
         TermsManagerWindow(self)
 
 
-# ──────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 #  Medical Terms Manager
-# ──────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 
 class TermsManagerWindow(ctk.CTkToplevel):
     def __init__(self, parent):
@@ -635,5 +705,7 @@ class TermsManagerWindow(ctk.CTkToplevel):
 
 
 if __name__ == "__main__":
+    logger.info("Launching VoxChart main window")
     app = MedicalDictationApp()
     app.mainloop()
+    logger.info("VoxChart exited cleanly")
