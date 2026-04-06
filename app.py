@@ -15,12 +15,16 @@ from dictation_engine import DictationEngine
 from epic_exporter import format_for_epic, copy_to_clipboard, export_to_file
 from shortcut_utils import create_shortcut, shortcut_already_exists
 from crash_reporter import setup_logging, install_exception_hook, BugReportDialog, get_recent_log, LOG_DIR, _open_folder
-from session_history import init_db, start_session, stop_session, list_sessions, delete_session, read_transcript
+from session_history import (init_db, start_session, stop_session,
+                              list_sessions, delete_session, read_transcript,
+                              search_sessions)
 from templates import all_templates, get_template, add_custom_template
 from updater import check_for_update
 from settings import SettingsWindow, load_config, save_config
 from autosave import AutoSaver, check_for_crash_recovery
 from version import APP_VERSION
+from about_dialog import AboutDialog
+from splash import SplashScreen
 
 # -- Bootstrap --
 setup_logging()
@@ -207,13 +211,13 @@ class FineTuneDialog(ctk.CTkToplevel):
 
     def _start(self):
         self._btn.configure(state="disabled", text="Training...")
-        from training_corpus import fine_tune, TrainingConfig
+        from training_corpus import fine_tune
         def run():
             try:
                 fine_tune(on_progress=self._log_msg)
-                self._log_msg("\n✅ Fine-tuning complete! Restart the app to use your model.")
+                self._log_msg("\n\u2705 Fine-tuning complete! Restart the app to use your model.")
             except Exception as e:
-                self._log_msg(f"\n❌ Error: {e}")
+                self._log_msg(f"\n\u274c Error: {e}")
             finally:
                 self.after(0, lambda: self._btn.configure(state="normal", text="Start Fine-tuning"))
         threading.Thread(target=run, daemon=True).start()
@@ -265,6 +269,35 @@ class EpicExportDialog(ctk.CTkToplevel):
         self.destroy()
         messagebox.showinfo("Copied!",
             f"Epic note copied to clipboard!\n\n1. Open Epic\n2. Open your note\n3. Ctrl+V\n\nSaved to:\n{saved}")
+
+
+# ---------------------------------------------------------------------------
+#  Update Banner Dialog (with release notes)
+# ---------------------------------------------------------------------------
+
+class UpdateNotesDialog(ctk.CTkToplevel):
+    """Shows the full release notes when user clicks 'What's New'."""
+    def __init__(self, parent, version: str, notes: str, url: str):
+        super().__init__(parent)
+        self.title(f"What's New in VoxChart {version}")
+        self.geometry("540x420")
+        self.grab_set()
+        ctk.CTkLabel(self, text=f"VoxChart {version}",
+                     font=ctk.CTkFont(size=20, weight="bold"),
+                     text_color="#2b7cff").pack(pady=(20, 4))
+        ctk.CTkLabel(self, text="Release Notes",
+                     font=ctk.CTkFont(size=12), text_color="#888").pack(pady=(0, 10))
+        box = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Courier New", size=11))
+        box.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        box.insert("1.0", notes or "No release notes available.")
+        box.configure(state="disabled")
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkButton(row, text="Open on GitHub", width=150,
+                      command=lambda: webbrowser.open(url)).pack(side="left")
+        ctk.CTkButton(row, text="Close", fg_color="gray", width=100,
+                      command=lambda: (self.grab_release(), self.destroy())
+                      ).pack(side="right")
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +379,7 @@ class MedicalDictationApp(ctk.CTk):
         self._waveform_job   = None
         self._update_banner  = None
         self._autosaver      = None
+        self._splash         = None
         init_db()
         logger.info("VoxChart %s starting", APP_VERSION)
 
@@ -359,10 +393,36 @@ class MedicalDictationApp(ctk.CTk):
             self.withdraw()
             self.after(200, self._run_wizard)
         else:
-            self._init_engine(cfg)
-            self.build_ui()
-            self._bind_shortcuts()
+            self._show_splash(cfg)
+
+    def _show_splash(self, cfg):
+        self.withdraw()
+        self._splash = SplashScreen(self, version=APP_VERSION)
+        self._splash.set_status("Loading configuration...")
+        self._splash.set_progress(0.1)
+        def load_in_bg():
+            try:
+                self._splash.set_status("Initializing engine...")
+                self._splash.set_progress(0.3)
+                self._init_engine(cfg)
+                self._splash.set_status("Building UI...")
+                self._splash.set_progress(0.7)
+                self.after(0, lambda: self._finish_launch(cfg))
+            except Exception as e:
+                logger.exception("Splash load failed")
+                self.after(0, lambda: self._finish_launch(cfg))
+        threading.Thread(target=load_in_bg, daemon=True).start()
+
+    def _finish_launch(self, cfg):
+        self._splash.set_progress(1.0)
+        self._splash.set_status("Ready!")
+        self.after(400, lambda: (
+            self._splash.close(),
+            self.deiconify(),
+            self.build_ui(),
+            self._bind_shortcuts(),
             self._post_launch()
+        ))
 
     def _offer_recovery(self, path: str):
         if messagebox.askyesno("Recover Autosave",
@@ -379,17 +439,20 @@ class MedicalDictationApp(ctk.CTk):
     def _post_launch(self):
         if not shortcut_already_exists():
             self.after(1500, self._auto_create_shortcut)
-        check_for_update(APP_VERSION, on_update_available=self._show_update_banner)
+        check_for_update(
+            APP_VERSION,
+            on_update_available=self._show_update_banner
+        )
 
     def _auto_create_shortcut(self):
         ok, _ = create_shortcut(silent=True)
         if ok:
             self.update_status("Desktop shortcut created.")
 
-    def _show_update_banner(self, version: str, url: str):
-        self.after(0, lambda: self._build_update_banner(version, url))
+    def _show_update_banner(self, version: str, url: str, notes: str = ""):
+        self.after(0, lambda: self._build_update_banner(version, url, notes))
 
-    def _build_update_banner(self, version: str, url: str):
+    def _build_update_banner(self, version: str, url: str, notes: str = ""):
         if self._update_banner:
             return
         banner = ctk.CTkFrame(self, fg_color="#1a4a1a", corner_radius=0)
@@ -398,11 +461,16 @@ class MedicalDictationApp(ctk.CTk):
                      text=f"  \u2b06  VoxChart {version} is available!",
                      font=ctk.CTkFont(size=13, weight="bold"),
                      text_color="#90ee90").pack(side="left", padx=10, pady=8)
-        ctk.CTkButton(banner, text="Open Release Page", width=160,
+        ctk.CTkButton(banner, text="What's New", width=110,
+                      fg_color="#2d7a2d", hover_color="#3a9e3a",
+                      command=lambda: UpdateNotesDialog(self, version, notes, url)
+                      ).pack(side="left", padx=6, pady=8)
+        ctk.CTkButton(banner, text="Download", width=100,
                       fg_color="#2d7a2d", hover_color="#3a9e3a",
                       command=lambda: webbrowser.open(url)).pack(side="left", padx=6, pady=8)
         ctk.CTkButton(banner, text="Dismiss", width=80, fg_color="gray",
-                      command=lambda: (banner.destroy(), setattr(self, '_update_banner', None))
+                      command=lambda: (banner.destroy(),
+                                       setattr(self, '_update_banner', None))
                       ).pack(side="right", padx=10, pady=8)
         self._update_banner = banner
 
@@ -430,11 +498,7 @@ class MedicalDictationApp(ctk.CTk):
         OnboardingWizard(self, on_complete=self._wizard_done)
 
     def _wizard_done(self, cfg):
-        self._init_engine(cfg)
-        self.build_ui()
-        self._bind_shortcuts()
-        self.deiconify()
-        self._post_launch()
+        self._show_splash(cfg)
 
     def _init_engine(self, cfg):
         self.engine = DictationEngine(
@@ -443,6 +507,8 @@ class MedicalDictationApp(ctk.CTk):
             compute_type=cfg.get("compute_type", "int8"),
             output_dir=OUTPUT_DIR,
             corpus_dir="training_corpus",
+            language=cfg.get("language", "en"),
+            mic_index=cfg.get("mic_index", None),
         )
         self.engine.on_text_callback   = self.append_transcript
         self.engine.on_status_callback = self.update_status
@@ -476,6 +542,8 @@ class MedicalDictationApp(ctk.CTk):
                       ).pack(side="right", padx=(0,6), pady=10)
         ctk.CTkButton(top, text="View Log",      command=self.open_view_log,
                       width=90,  fg_color="#333").pack(side="right", padx=(0,6), pady=10)
+        ctk.CTkButton(top, text="\u2139 About",  command=self.open_about,
+                      width=80,  fg_color="#333").pack(side="right", padx=(0,6), pady=10)
         ctk.CTkButton(top, text="\u2699 Settings", command=self.open_settings,
                       width=100, fg_color="#2b4a7c", hover_color="#3a6aae"
                       ).pack(side="right", padx=(0,6), pady=10)
@@ -559,34 +627,60 @@ class MedicalDictationApp(ctk.CTk):
         ctk.CTkButton(foot, text="Open Folder",
                       command=self.open_output_folder, width=140).pack(side="right", padx=10, pady=8)
 
-    # -- Sidebar --
+    # -- Sidebar with search --
 
     def _build_sidebar(self, parent):
         self._sidebar_visible = True
-        self._sidebar = ctk.CTkFrame(parent, width=220)
+        self._sidebar = ctk.CTkFrame(parent, width=240)
         self._sidebar.grid(row=0, column=0, sticky="nsew")
         self._sidebar.grid_propagate(False)
-        self._sidebar.rowconfigure(1, weight=1)
+        self._sidebar.rowconfigure(2, weight=1)
 
         hdr = ctk.CTkFrame(self._sidebar, fg_color="transparent")
-        hdr.grid(row=0, column=0, sticky="ew", padx=6, pady=(8,0))
+        hdr.grid(row=0, column=0, sticky="ew", padx=6, pady=(8, 0))
         ctk.CTkLabel(hdr, text="Session History",
                      font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
         ctk.CTkButton(hdr, text="\u00d7", width=28, height=28, fg_color="#333",
                       command=self._toggle_sidebar).pack(side="right")
 
+        # Search bar
+        self._search_var = ctk.StringVar()
+        self._search_var.trace_add("write", self._on_search_changed)
+        search_entry = ctk.CTkEntry(
+            self._sidebar, textvariable=self._search_var,
+            placeholder_text="Search sessions...", height=30
+        )
+        search_entry.grid(row=1, column=0, sticky="ew", padx=6, pady=(4, 2))
+
         self._session_scroll = ctk.CTkScrollableFrame(self._sidebar)
-        self._session_scroll.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        self._session_scroll.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
 
         ctk.CTkButton(self._sidebar, text="+ New Session",
                       command=self._clear_transcript, fg_color="#333", height=30
-                      ).grid(row=2, column=0, sticky="ew", padx=6, pady=(0,8))
+                      ).grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 8))
 
         self._refresh_session_list()
 
         self._sidebar_toggle_btn = ctk.CTkButton(
             parent, text="\u2630 History", width=90, height=28, fg_color="#333",
             command=self._toggle_sidebar)
+
+    def _on_search_changed(self, *_):
+        query = self._search_var.get().strip()
+        for w in self._session_scroll.winfo_children():
+            w.destroy()
+        if query:
+            results = search_sessions(query, limit=50)
+        else:
+            results = list_sessions(50)
+        if not results:
+            ctk.CTkLabel(self._session_scroll,
+                         text="No sessions found.",
+                         text_color="gray",
+                         font=ctk.CTkFont(size=11)).pack(pady=20)
+            return
+        for s in results:
+            self._build_session_row(s)
 
     def _toggle_sidebar(self):
         if self._sidebar_visible:
@@ -767,7 +861,6 @@ class MedicalDictationApp(ctk.CTk):
             self.is_recording = True
             self._start_waveform()
             self._attach_audio_level_hook()
-            # Start autosaver
             interval = cfg.get("autosave_interval", 60)
             self._autosaver = AutoSaver(
                 get_transcript=lambda: self.transcript_text.get("1.0", "end-1c"),
@@ -819,10 +912,15 @@ class MedicalDictationApp(ctk.CTk):
     def _on_settings_saved(self, cfg):
         font_size = cfg.get("font_size", 13)
         self.transcript_text.configure(font=ctk.CTkFont(family="Courier", size=font_size))
+        # Re-init engine with new language/device/model if changed
+        self._init_engine(cfg)
         self.update_status("Settings saved.")
 
     def open_finetune(self):
         FineTuneDialog(self)
+
+    def open_about(self):
+        AboutDialog(self, version=APP_VERSION)
 
     def copy_to_epic(self):
         transcript = self.transcript_text.get("1.0", "end-1c").strip()
