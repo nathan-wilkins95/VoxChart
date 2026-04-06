@@ -17,54 +17,53 @@ param(
     [switch]$DevMode
 )
 
-$AppName     = "VoxChart"
+$AppName      = "VoxChart"
 $ShortcutName = "VoxChart.lnk"
-$Desktop     = [Environment]::GetFolderPath('Desktop')
-$RepoRoot    = $PSScriptRoot
-$IconSearch  = @(
+$Desktop      = [Environment]::GetFolderPath('Desktop')
+$RepoRoot     = $PSScriptRoot
+$IconSearch   = @(
     (Join-Path $RepoRoot 'assets\voxchart.ico'),
     (Join-Path $RepoRoot 'assets\icon.ico'),
     (Join-Path $RepoRoot 'icon.ico')
 )
 
-# ── Locate icon ────────────────────────────────────────────────
+# -- Locate icon -----------------------------------------------
 $IconPath = $null
 foreach ($p in $IconSearch) {
     if (Test-Path $p) { $IconPath = $p; break }
 }
 
-# ── Decide target: EXE or bat launcher ─────────────────────────
-$ExePath  = Join-Path $RepoRoot 'dist\VoxChart\VoxChart.exe'
-$BatPath  = Join-Path $RepoRoot 'run_app_windows.bat'
+# -- Decide target: EXE or bat launcher ------------------------
+$ExePath = Join-Path $RepoRoot 'dist\VoxChart\VoxChart.exe'
+$BatPath = Join-Path $RepoRoot 'run_app_windows.bat'
 
 if (-not $DevMode -and (Test-Path $ExePath)) {
-    $TargetPath      = $ExePath
-    $WorkingDir      = Split-Path $ExePath
-    $Arguments       = ''
-    $WindowStyle     = 1   # normal
+    $TargetPath  = $ExePath
+    $WorkingDir  = Split-Path $ExePath
+    $Arguments   = ''
+    $WindowStyle = 1
     Write-Host "[VoxChart] Using compiled EXE: $ExePath" -ForegroundColor Cyan
 } elseif (Test-Path $BatPath) {
-    # Launch bat via cmd so no console window flashes
-    $TargetPath      = 'cmd.exe'
-    $Arguments       = "/c `"$BatPath`""
-    $WorkingDir      = $RepoRoot
-    $WindowStyle     = 7   # minimized (hides console)
+    $TargetPath  = 'cmd.exe'
+    $Arguments   = "/c `"$BatPath`""
+    $WorkingDir  = $RepoRoot
+    $WindowStyle = 7
     Write-Host "[VoxChart] Using dev launcher: $BatPath" -ForegroundColor Yellow
 } else {
     Write-Error "Cannot find VoxChart.exe or run_app_windows.bat in $RepoRoot"
     exit 1
 }
 
-# ── Build shortcut ──────────────────────────────────────────────
-$WshShell  = New-Object -ComObject WScript.Shell
-$LnkPath   = Join-Path $Desktop $ShortcutName
-$Shortcut  = $WshShell.CreateShortcut($LnkPath)
+# -- Build shortcut --------------------------------------------
+$WshShell = New-Object -ComObject WScript.Shell
+$LnkPath  = Join-Path $Desktop $ShortcutName
+$Shortcut = $WshShell.CreateShortcut($LnkPath)
 
 $Shortcut.TargetPath       = $TargetPath
 $Shortcut.Arguments        = $Arguments
 $Shortcut.WorkingDirectory = $WorkingDir
 $Shortcut.WindowStyle      = $WindowStyle
-$Shortcut.Description      = "VoxChart — Offline AI Medical Dictation"
+$Shortcut.Description      = "VoxChart - Offline AI Medical Dictation"
 
 if ($IconPath) {
     $Shortcut.IconLocation = "$IconPath,0"
@@ -76,8 +75,8 @@ if ($IconPath) {
 $Shortcut.Save()
 
 Write-Host ""
-Write-Host "✅ Desktop shortcut created!" -ForegroundColor Green
+Write-Host "Desktop shortcut created!" -ForegroundColor Green
 Write-Host "   Location : $LnkPath"
 Write-Host "   Target   : $TargetPath $Arguments"
 Write-Host ""
-Write-Host "Double-click 'VoxChart' on your desktop to launch." -ForegroundColor White
+Write-Host "Double-click VoxChart on your desktop to launch." -ForegroundColor White
