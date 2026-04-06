@@ -1,20 +1,30 @@
 import os
-import queue
 import sys
 import threading
+import queue
 import time
+import hashlib
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
 from faster_whisper import WhisperModel
-
 from medical_postprocessor import correct_medical_text
 
-SAMPLE_RATE = 16000
-CHANNELS = 1
-CHUNK_SIZE = 4000  # frames per read callback
+# Audio constants
+SAMPLE_RATE = 16000      # Whisper target rate
+INPUT_RATE = 48000       # Intel mic native rate
+INPUT_DEVICE = 9         # Intel WASAPI mic
+INPUT_CHANNELS = 2       # Stereo mic array
+CHUNK_SIZE = 4000        # Frames per read at 16k
+INPUT_CHUNK = CHUNK_SIZE * 3  # Frames at 48k (48k/16k = 3x)
+
+
+def resource_path(*parts):
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base.joinpath(*parts)
 
 
 class DictationEngine:
@@ -50,20 +60,7 @@ class DictationEngine:
         self.on_text_callback = None
         self.on_status_callback = None
 
-    # ---- model ----
-
-    def load_model(self):
-        self._log_status(f"Loading model: {self.model_size} on {self.device}...")
-        t0 = time.time()
-        self.model = WhisperModel(
-            self.model_size,
-            device=self.device,
-            compute_type=self.compute_type,
-            download_root=str(Path.home() / ".cache" / "whisper"),
-        )
-        self._log_status(f"Model loaded in {time.time() - t0:.1f}s")
-
-    # ---- internal helpers ----
+    # ---- helpers ----
 
     def _log_status(self, msg: str):
         if self.on_status_callback:
@@ -73,14 +70,45 @@ class DictationEngine:
         if self.on_text_callback:
             self.on_text_callback(text)
 
-    # ---- audio (sounddevice callback — works on Windows, Linux, macOS) ----
+    # ---- model ----
+
+    def _get_local_model_dir(self):
+        bundled = resource_path("models", self.model_size)
+        if bundled.exists() and bundled.is_dir():
+            return bundled
+        local = Path("models") / self.model_size
+        if local.exists() and local.is_dir():
+            return local
+        return None
+
+    def load_model(self):
+        local_dir = self._get_local_model_dir()
+        t0 = time.time()
+        if local_dir:
+            self._log_status(f"Loading bundled model from {local_dir}...")
+            model_ref = str(local_dir)
+        else:
+            self._log_status(f"Loading {self.model_size} on {self.device}...")
+            model_ref = self.model_size
+
+        self.model = WhisperModel(
+            model_ref,
+            device=self.device,
+            compute_type=self.compute_type,
+            download_root=str(Path.home() / ".cache" / "whisper"),
+        )
+        self._log_status(f"Model loaded in {time.time() - t0:.1f}s")
+
+    # ---- audio ----
 
     def _sd_callback(self, indata, frames, time_info, status):
-        """Called by sounddevice on each audio block."""
         if status:
             self._log_status(f"Audio warning: {status}")
-        # indata is float32 in [-1, 1]; convert to int16 bytes for queue
-        pcm = (indata[:, 0] * 32767).astype(np.int16).tobytes()
+        # Stereo -> mono
+        mono = indata.mean(axis=1)
+        # Downsample 48000 -> 16000 (factor of 3)
+        resampled = mono[::3]
+        pcm = (resampled * 32767).astype(np.int16).tobytes()
         self.audio_queue.put(pcm)
 
     # ---- transcription loop ----
@@ -89,7 +117,7 @@ class DictationEngine:
         audio_buffer = []
         buffer_duration = 0.0
         last_flush_time = time.time()
-        BUFFER_SECONDS = 15
+        buffer_seconds = 15
 
         with open(output_file, "a", encoding="utf-8") as f:
             while not self.stop_event.is_set() or not self.audio_queue.empty():
@@ -101,7 +129,7 @@ class DictationEngine:
                 audio_buffer.append(data)
                 buffer_duration += len(data) / (SAMPLE_RATE * 2)
 
-                flush_ready = buffer_duration >= BUFFER_SECONDS or (
+                flush_ready = buffer_duration >= buffer_seconds or (
                     time.time() - last_flush_time > 8 and buffer_duration > 3
                 )
                 if not flush_ready:
@@ -142,10 +170,6 @@ class DictationEngine:
                     f.flush()
                     self._emit_text(corrected_text)
 
-                    # Save training pair
-                    import hashlib
-                    from datetime import datetime
-
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     hid = hashlib.sha256(corrected_text.encode()).hexdigest()[:8]
                     sf.write(
@@ -169,18 +193,20 @@ class DictationEngine:
         self.audio_queue = queue.Queue()
         self.is_running = True
 
-        # Open sounddevice InputStream (works on Windows / Linux / macOS)
         self.stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
+            samplerate=INPUT_RATE,
+            channels=INPUT_CHANNELS,
+            device=INPUT_DEVICE,
             dtype="float32",
-            blocksize=CHUNK_SIZE,
+            blocksize=INPUT_CHUNK,
             callback=self._sd_callback,
         )
         self.stream.start()
 
         self.transcribe_thread = threading.Thread(
-            target=self._transcribe_loop, args=(output_file,), daemon=True
+            target=self._transcribe_loop,
+            args=(output_file,),
+            daemon=True,
         )
         self.transcribe_thread.start()
         self._log_status("Dictation started.")
