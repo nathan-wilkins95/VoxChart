@@ -37,6 +37,9 @@ a = Analysis(
         'autosave',
         'training_corpus',
         'version',
+        # v1.9 modules
+        'splash',
+        'about_dialog',
         # ML / audio
         'faster_whisper',
         'ctranslate2',
