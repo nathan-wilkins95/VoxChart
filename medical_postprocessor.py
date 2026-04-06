@@ -1,37 +1,72 @@
+"""
+medical_postprocessor.py
+Corrects Whisper misrecognitions using the medical_terms SQLite DB.
+Gracefully handles missing DB (no crash, just passthrough).
+"""
+from __future__ import annotations
 import re
 import sqlite3
+import logging
 from pathlib import Path
+from functools import lru_cache
 
-DB_PATH = "medical_terms.db"
+DB_PATH = Path("medical_terms.db")
+logger  = logging.getLogger("voxchart.postprocessor")
 
 
-def load_terms():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT term, common_misrecognition FROM terms")
-    rows = cur.fetchall()
-    conn.close()
-    # Map misrecognition -> correct term, plus direct term boosts
-    mis_to_correct = {}
-    correct_terms = set()
+@lru_cache(maxsize=1)
+def _load_terms() -> tuple[dict, set]:
+    """
+    Load correction table from SQLite DB.
+    Returns (mis_to_correct, correct_terms_set).
+    Cached after first call so DB is only read once per session.
+    """
+    if not DB_PATH.exists():
+        logger.debug("medical_terms.db not found — postprocessor running in passthrough mode")
+        return {}, set()
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        cur  = conn.cursor()
+        cur.execute("SELECT term, common_misrecognition FROM terms")
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        logger.warning("Failed to load medical terms DB: %s", e)
+        return {}, set()
+
+    mis_to_correct: dict[str, str] = {}
+    correct_terms:  set[str]       = set()
     for term, mis in rows:
-        correct_terms.add(term.lower())
-        if mis:
+        if term:
+            correct_terms.add(term.lower())
+        if mis and term:
             mis_to_correct[mis.lower()] = term
+    logger.info("Loaded %d misrecognition corrections, %d terms",
+                len(mis_to_correct), len(correct_terms))
     return mis_to_correct, correct_terms
 
 
-MIS_TO_CORRECT, CORRECT_TERMS = load_terms()
+def reload_terms():
+    """Force reload of the DB (call after adding new terms in the UI)."""
+    _load_terms.cache_clear()
+    _load_terms()
 
 
 def correct_medical_text(text: str) -> str:
-    text_lower = text.lower()
-    # Simple phrase replacements for known misrecognitions
-    for mis, correct in MIS_TO_CORRECT.items():
-        if mis in text_lower:
-            # Case-insensitive replace, preserving surrounding context
-            text = re.sub(re.escape(mis), correct, text, flags=re.IGNORECASE)
+    """
+    Apply misrecognition corrections to a Whisper transcript segment.
+    Safe to call even if the DB does not exist.
+    """
+    if not text.strip():
+        return text
 
-    # Optional: you can add more sophisticated rules here
-    # e.g., fix "rails" -> "rales" only in respiratory context
+    mis_to_correct, _ = _load_terms()
+    if not mis_to_correct:
+        return text  # passthrough
+
+    for mis, correct in mis_to_correct.items():
+        # Whole-word replacement only (avoids mangling substrings)
+        pattern = r'(?<![\w-])' + re.escape(mis) + r'(?![\w-])'
+        text = re.sub(pattern, correct, text, flags=re.IGNORECASE)
+
     return text
