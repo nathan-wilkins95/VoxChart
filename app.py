@@ -79,7 +79,7 @@ class OnboardingWizard(ctk.CTkToplevel):
                      font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(40, 10))
         ctk.CTkLabel(f, text=(
             "VoxChart turns your voice into structured medical chart notes\n"
-            "using a fully offline AI \u2014 no internet required after setup.\n\n"
+            "using a fully offline AI — no internet required after setup.\n\n"
             "This wizard will configure your microphone and compute device."
         ), font=ctk.CTkFont(size=13), justify="center").pack(pady=10, padx=30)
         self._nav_buttons(f, back=False)
@@ -87,11 +87,11 @@ class OnboardingWizard(ctk.CTkToplevel):
 
     def _build_device_step(self):
         f = ctk.CTkFrame(self, fg_color="transparent")
-        ctk.CTkLabel(f, text="Step 1 of 2 \u2014 Compute Device",
+        ctk.CTkLabel(f, text="Step 1 of 2 — Compute Device",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(30, 10))
         gpu_label = f"GPU detected: {self.gpu_name}" if self.gpu_available else "No NVIDIA GPU detected"
         gpu_color = "green" if self.gpu_available else "orange"
-        rec_text  = "GPU recommended \u2014 faster transcription." if self.gpu_available else "CPU mode. Transcription may be slower."
+        rec_text  = "GPU recommended — faster transcription." if self.gpu_available else "CPU mode. Transcription may be slower."
         ctk.CTkLabel(f, text=gpu_label, font=ctk.CTkFont(size=13, weight="bold"), text_color=gpu_color).pack(pady=(10, 4))
         ctk.CTkLabel(f, text=rec_text,  font=ctk.CTkFont(size=12), text_color="gray").pack(pady=(0, 20))
         ctk.CTkLabel(f, text="Select compute device:", font=ctk.CTkFont(size=13)).pack()
@@ -107,7 +107,7 @@ class OnboardingWizard(ctk.CTkToplevel):
 
     def _build_mic_step(self):
         f = ctk.CTkFrame(self, fg_color="transparent")
-        ctk.CTkLabel(f, text="Step 2 of 2 \u2014 Microphone",
+        ctk.CTkLabel(f, text="Step 2 of 2 — Microphone",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(30, 10))
         self.wizard_mic_menu = ctk.CTkOptionMenu(f, variable=self.wizard_mic_var, width=380)
         self.wizard_mic_menu.pack(pady=6)
@@ -380,6 +380,7 @@ class MedicalDictationApp(ctk.CTk):
         self._update_banner  = None
         self._autosaver      = None
         self._splash         = None
+        self._terms_window   = None  # strong reference to prevent GC
         init_db()
         logger.info("VoxChart %s starting", APP_VERSION)
 
@@ -912,7 +913,6 @@ class MedicalDictationApp(ctk.CTk):
     def _on_settings_saved(self, cfg):
         font_size = cfg.get("font_size", 13)
         self.transcript_text.configure(font=ctk.CTkFont(family="Courier", size=font_size))
-        # Re-init engine with new language/device/model if changed
         self._init_engine(cfg)
         self.update_status("Settings saved.")
 
@@ -980,7 +980,12 @@ class MedicalDictationApp(ctk.CTk):
         else:                    subprocess.Popen(["xdg-open", folder])
 
     def open_terms_manager(self):
-        TermsManagerWindow(self)
+        # If already open, bring it to front instead of creating a second window
+        if self._terms_window is not None and self._terms_window.winfo_exists():
+            self._terms_window.lift()
+            self._terms_window.focus_force()
+            return
+        self._terms_window = TermsManagerWindow(self)
 
 
 # ---------------------------------------------------------------------------
@@ -992,7 +997,14 @@ class TermsManagerWindow(ctk.CTkToplevel):
         super().__init__(parent)
         self.title("Manage Medical Terms")
         self.geometry("700x500")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
+
+    def _on_close(self):
+        # Clear the parent's reference so the next click opens a fresh window
+        if hasattr(self.master, "_terms_window"):
+            self.master._terms_window = None
+        self.destroy()
 
     def _build_ui(self):
         ctk.CTkLabel(self, text="Add / Edit Medical Terms",
