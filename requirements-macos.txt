@@ -1,0 +1,17 @@
+# VoxChart — macOS requirements
+# Install with: pip install -r requirements-macos.txt
+#
+# NOTE: CUDA is not available on macOS.
+# faster-whisper will run on CPU (int8) by default.
+# Apple Silicon (M1/M2/M3) users: MPS acceleration is NOT yet supported
+# by faster-whisper/CTranslate2 — CPU int8 is used instead.
+
+faster-whisper
+customtkinter
+sounddevice
+soundfile
+numpy
+
+# macOS may need these system libs for sounddevice (via Homebrew):
+# brew install portaudio
+# If pip install sounddevice fails, run the above first.
