@@ -980,11 +980,25 @@ class MedicalDictationApp(ctk.CTk):
         else:                    subprocess.Popen(["xdg-open", folder])
 
     def open_terms_manager(self):
-        # If already open, bring it to front instead of creating a second window
-        if self._terms_window is not None and self._terms_window.winfo_exists():
-            self._terms_window.lift()
-            self._terms_window.focus_force()
-            return
+        """
+        Open the Medical Terms Manager window.
+
+        Guard against the CTkToplevel destroy-race on Windows/Linux:
+        winfo_exists() can return True for a brief window while the widget
+        is being torn down, causing lift()/focus_force() to raise TclError.
+        We wrap those calls in try/except and treat any TclError as
+        'window is gone — open a fresh one'.
+        """
+        if self._terms_window is not None:
+            try:
+                if self._terms_window.winfo_exists():
+                    self._terms_window.lift()
+                    self._terms_window.focus_force()
+                    return
+            except Exception:
+                # TclError: window is mid-destroy; fall through to create a new one
+                pass
+            self._terms_window = None
         self._terms_window = TermsManagerWindow(self)
 
 
@@ -1001,9 +1015,17 @@ class TermsManagerWindow(ctk.CTkToplevel):
         self._build_ui()
 
     def _on_close(self):
-        # Clear the parent's reference so the next click opens a fresh window
-        if hasattr(self.master, "_terms_window"):
-            self.master._terms_window = None
+        """
+        Clear the parent's strong reference *after* the current event has
+        finished processing (after_idle).  On Windows/Linux, clearing it
+        synchronously inside the WM_DELETE_WINDOW callback can leave the
+        reference dangling just long enough for open_terms_manager to see
+        winfo_exists() == True on a half-destroyed widget.
+        """
+        def _clear_ref():
+            if hasattr(self.master, "_terms_window"):
+                self.master._terms_window = None
+        self.after_idle(_clear_ref)
         self.destroy()
 
     def _build_ui(self):
