@@ -983,11 +983,9 @@ class MedicalDictationApp(ctk.CTk):
         """
         Open the Medical Terms Manager window.
 
-        Guard against the CTkToplevel destroy-race on Windows/Linux:
-        winfo_exists() can return True for a brief window while the widget
-        is being torn down, causing lift()/focus_force() to raise TclError.
-        We wrap those calls in try/except and treat any TclError as
-        'window is gone — open a fresh one'.
+        On Windows/Linux, CTkToplevel can render behind the main window on
+        first open. Guard: check winfo_exists() with TclError protection,
+        then focus the existing window or create a fresh one.
         """
         if self._terms_window is not None:
             try:
@@ -996,9 +994,9 @@ class MedicalDictationApp(ctk.CTk):
                     self._terms_window.focus_force()
                     return
             except Exception:
-                # TclError: window is mid-destroy; fall through to create a new one
                 pass
             self._terms_window = None
+
         self._terms_window = TermsManagerWindow(self)
 
 
@@ -1014,6 +1012,20 @@ class TermsManagerWindow(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
 
+        # Defer lift+focus so the Tk event loop finishes drawing the window
+        # before we try to raise it.  Without this, on Windows/Linux the
+        # window renders behind the main window and looks like it closed.
+        self.after(50, self._raise_window)
+
+    def _raise_window(self):
+        """Bring the window to the front after the event loop has drawn it."""
+        try:
+            self.lift()
+            self.focus_force()
+            self.grab_set()
+        except Exception:
+            pass  # Window already destroyed — ignore
+
     def _on_close(self):
         """
         Clear the parent's strong reference *after* the current event has
@@ -1022,6 +1034,10 @@ class TermsManagerWindow(ctk.CTkToplevel):
         reference dangling just long enough for open_terms_manager to see
         winfo_exists() == True on a half-destroyed widget.
         """
+        try:
+            self.grab_release()
+        except Exception:
+            pass
         def _clear_ref():
             if hasattr(self.master, "_terms_window"):
                 self.master._terms_window = None
