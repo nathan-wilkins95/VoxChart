@@ -13,6 +13,8 @@ from pathlib import Path
 import customtkinter as ctk
 from dictation_engine import DictationEngine
 from epic_exporter import format_for_epic, copy_to_clipboard, export_to_file
+from epic_integration_dialog import EpicIntegrationDialog
+from epic_fhir import get_client
 from shortcut_utils import create_shortcut, shortcut_already_exists
 from crash_reporter import setup_logging, install_exception_hook, BugReportDialog, get_recent_log, LOG_DIR, _open_folder
 from session_history import (init_db, start_session, stop_session,
@@ -221,54 +223,6 @@ class FineTuneDialog(ctk.CTkToplevel):
             finally:
                 self.after(0, lambda: self._btn.configure(state="normal", text="Start Fine-tuning"))
         threading.Thread(target=run, daemon=True).start()
-
-
-# ---------------------------------------------------------------------------
-#  Epic Export Dialog
-# ---------------------------------------------------------------------------
-
-class EpicExportDialog(ctk.CTkToplevel):
-    def __init__(self, parent, transcript: str):
-        super().__init__(parent)
-        self.title("Copy to Epic")
-        self.geometry("480x380")
-        self.resizable(False, False)
-        self.grab_set()
-        self.transcript = transcript
-        self._build_ui()
-
-    def _build_ui(self):
-        ctk.CTkLabel(self, text="Epic Export",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(20, 4))
-        ctk.CTkLabel(self, text="Optional: fill in patient info for the note header.",
-                     font=ctk.CTkFont(size=12), text_color="gray").pack(pady=(0, 14))
-        form = ctk.CTkFrame(self)
-        form.pack(fill="x", padx=30, pady=4)
-        fields = [("Provider Name", "e.g., Dr. Smith"), ("Patient Name", "e.g., John Doe"),
-                  ("Date of Birth", "e.g., 01/15/1970"), ("MRN", "e.g., 123456")]
-        self._entries: dict[str, ctk.CTkEntry] = {}
-        for row, (label, ph) in enumerate(fields):
-            ctk.CTkLabel(form, text=label, width=130, anchor="w").grid(row=row, column=0, padx=(0, 10), pady=6, sticky="w")
-            e = ctk.CTkEntry(form, width=260, placeholder_text=ph)
-            e.grid(row=row, column=1, pady=6)
-            self._entries[label] = e
-        btn = ctk.CTkFrame(self, fg_color="transparent")
-        btn.pack(fill="x", padx=30, pady=20)
-        ctk.CTkButton(btn, text="Cancel", fg_color="gray", width=100, command=self.destroy).pack(side="left")
-        ctk.CTkButton(btn, text="Copy to Epic Clipboard", width=220, command=self._export).pack(side="right")
-
-    def _export(self):
-        fmt  = format_for_epic(self.transcript,
-                               provider_name=self._entries["Provider Name"].get().strip(),
-                               patient_name=self._entries["Patient Name"].get().strip(),
-                               dob=self._entries["Date of Birth"].get().strip(),
-                               mrn=self._entries["MRN"].get().strip())
-        saved = export_to_file(fmt)
-        copy_to_clipboard(fmt)
-        self.grab_release()
-        self.destroy()
-        messagebox.showinfo("Copied!",
-            f"Epic note copied to clipboard!\n\n1. Open Epic\n2. Open your note\n3. Ctrl+V\n\nSaved to:\n{saved}")
 
 
 # ---------------------------------------------------------------------------
@@ -927,7 +881,13 @@ class MedicalDictationApp(ctk.CTk):
         if not transcript:
             messagebox.showwarning("No Transcript", "Dictate something first!")
             return
-        EpicExportDialog(self, transcript)
+        cfg = load_config()
+        EpicIntegrationDialog(
+            self,
+            transcript=transcript,
+            fhir_client=get_client(),
+            provider_name=cfg.get("provider_name", ""),
+        )
 
     def create_shortcut_manual(self):
         ok, msg = create_shortcut(silent=False)
