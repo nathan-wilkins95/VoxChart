@@ -39,3 +39,9 @@ logs/
 
 # Runtime markers
 .shortcut_created
+
+# Epic FHIR — token cache (contains access tokens, never commit)
+epic_fhir_tokens.json
+
+# Epic exports (local patient data, never commit)
+epic_exports/

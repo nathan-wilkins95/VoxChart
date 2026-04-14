@@ -1,0 +1,13 @@
+{
+    "_comment": "VoxChart Epic FHIR Config — sandbox client ID pre-filled. Set use_sandbox=false and fill production URLs when ready for production.",
+    "client_id": "7ffcbe26-9fe4-4f64-a524-ad6c6c524e11",
+    "redirect_uri": "http://localhost:8765/callback",
+    "scope": "launch/patient openid fhirUser patient/Patient.read patient/Encounter.read patient/DocumentReference.write",
+    "use_sandbox": true,
+    "sandbox_base_url": "https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4",
+    "sandbox_auth_url": "https://fhir.epic.com/interconnect-fhir-oauth/oauth2/authorize",
+    "sandbox_token_url": "https://fhir.epic.com/interconnect-fhir-oauth/oauth2/token",
+    "production_base_url": "",
+    "production_auth_url": "",
+    "production_token_url": ""
+}
