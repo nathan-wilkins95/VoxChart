@@ -11,6 +11,7 @@ customtkinter
 sounddevice
 soundfile
 numpy
+requests
 
 # macOS may need these system libs for sounddevice (via Homebrew):
 # brew install portaudio
