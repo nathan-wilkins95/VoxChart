@@ -1,24 +1,24 @@
 """epic_exporter.py
 
-Formats VoxChart transcripts into Epic-ready SmartPhrase text and
-copies them to the clipboard for direct paste into any Epic note field.
+Enhanced Epic clipboard integration for VoxChart.
 
-No Epic API or credentials required.
-
-Usage (standalone):
-    python epic_exporter.py chart_notes/chart_note.txt
-
-Usage (from app.py):
-    from epic_exporter import format_for_epic, copy_to_clipboard
+Features
+--------
+* Formats transcripts into Epic-ready text with SmartPhrase (.VOXNOTE.) syntax
+* Per-section copy support (CC, HPI, Exam, Assessment, Plan)
+* Persists a local export history in SQLite (epic_exports/history.db)
+* Standalone CLI: python epic_exporter.py <transcript.txt>
 """
 
 from __future__ import annotations
 
 import re
 import sys
+import sqlite3
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,15 +54,36 @@ _PLAN_KEYWORDS = [
     r"\b(will (check|monitor|recheck|repeat|order|refer|schedule))\b",
 ]
 
+SECTION_ORDER = [
+    "CHIEF COMPLAINT",
+    "HISTORY OF PRESENT ILLNESS",
+    "PHYSICAL EXAMINATION",
+    "ASSESSMENT",
+    "PLAN",
+    "ADDITIONAL NOTES",
+]
+
+# SmartPhrase dot-phrase trigger for each section (Epic expands these)
+SMARTPHRASE_TRIGGERS = {
+    "CHIEF COMPLAINT":            ".VOXCC.",
+    "HISTORY OF PRESENT ILLNESS": ".VOXHPI.",
+    "PHYSICAL EXAMINATION":       ".VOXEXAM.",
+    "ASSESSMENT":                 ".VOXASSESS.",
+    "PLAN":                       ".VOXPLAN.",
+    "ADDITIONAL NOTES":           ".VOXNOTES.",
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Internal helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _score_sentence(sentence: str, patterns: list[str]) -> int:
-    """Return count of keyword pattern matches in sentence."""
     s = sentence.lower()
     return sum(1 for p in patterns if re.search(p, s, re.IGNORECASE))
 
 
 def _clean_transcript(raw: str) -> str:
-    """Strip session markers and extra whitespace."""
     lines = []
     for line in raw.splitlines():
         stripped = line.strip()
@@ -73,22 +94,12 @@ def _clean_transcript(raw: str) -> str:
 
 
 def _split_into_sentences(text: str) -> list[str]:
-    """Naive sentence splitter."""
     parts = re.split(r"(?<=[.!?])\s+", text)
     return [p.strip() for p in parts if p.strip()]
 
 
 def _classify_sentences(sentences: list[str]) -> dict[str, list[str]]:
-    """Assign each sentence to the best-matching section."""
-    sections: dict[str, list[str]] = {
-        "CHIEF COMPLAINT": [],
-        "HISTORY OF PRESENT ILLNESS": [],
-        "PHYSICAL EXAMINATION": [],
-        "ASSESSMENT": [],
-        "PLAN": [],
-        "ADDITIONAL NOTES": [],
-    }
-
+    sections: dict[str, list[str]] = {s: [] for s in SECTION_ORDER}
     scorers = [
         ("CHIEF COMPLAINT",            _CC_KEYWORDS),
         ("HISTORY OF PRESENT ILLNESS", _HPI_KEYWORDS),
@@ -96,15 +107,44 @@ def _classify_sentences(sentences: list[str]) -> dict[str, list[str]]:
         ("ASSESSMENT",                  _ASSESSMENT_KEYWORDS),
         ("PLAN",                         _PLAN_KEYWORDS),
     ]
-
     for sentence in sentences:
         scores = {name: _score_sentence(sentence, kw) for name, kw in scorers}
-        best_section = max(scores, key=scores.get)
-        if scores[best_section] == 0:
-            best_section = "ADDITIONAL NOTES"
-        sections[best_section].append(sentence)
-
+        best = max(scores, key=scores.get)
+        sections["ADDITIONAL NOTES" if scores[best] == 0 else best].append(sentence)
     return sections
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Public API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_sections(transcript: str) -> dict[str, str]:
+    """
+    Parse a raw transcript into a dict of {section_name: text}.
+    Only sections with content are included.
+    """
+    cleaned = _clean_transcript(transcript)
+    sentences = _split_into_sentences(cleaned)
+    classified = _classify_sentences(sentences)
+    return {
+        section: " ".join(lines)
+        for section, lines in classified.items()
+        if lines
+    }
+
+
+def format_section(section: str, content: str, smartphrase: bool = False) -> str:
+    """
+    Format a single section as an Epic-ready block.
+    If smartphrase=True, prepend the SmartPhrase dot-trigger.
+    """
+    trigger = SMARTPHRASE_TRIGGERS.get(section, "")
+    header = f"{section}:"
+    sep = "-" * len(section)
+    body = content.strip()
+    if smartphrase and trigger:
+        return f"{trigger}\n{header}\n{sep}\n{body}\n"
+    return f"{header}\n{sep}\n{body}\n"
 
 
 def format_for_epic(
@@ -113,65 +153,51 @@ def format_for_epic(
     patient_name: str = "",
     dob: str = "",
     mrn: str = "",
+    encounter_id: str = "",
+    visit_type: str = "",
+    smartphrase: bool = False,
 ) -> str:
     """
-    Format a raw VoxChart transcript into an Epic SmartPhrase-ready note.
+    Format a VoxChart transcript into a full Epic-ready chart note.
 
     Parameters
     ----------
-    transcript    : Raw dictated text (multi-line OK).
-    provider_name : Provider's name for signature line.
-    patient_name  : Optional patient name for header.
+    transcript    : Raw dictated text.
+    provider_name : Provider name for signature.
+    patient_name  : Optional patient name.
     dob           : Optional date of birth.
     mrn           : Optional MRN.
-
-    Returns
-    -------
-    Formatted string ready for paste into Epic.
+    encounter_id  : Optional Epic encounter ID.
+    visit_type    : Optional visit type (e.g. 'Office Visit').
+    smartphrase   : If True, prefix each section with its SmartPhrase trigger.
     """
     now = datetime.now()
     date_str = now.strftime("%B %d, %Y")
     time_str = now.strftime("%I:%M %p")
 
-    cleaned = _clean_transcript(transcript)
-    sentences = _split_into_sentences(cleaned)
-    sections = _classify_sentences(sentences)
-
+    sections = parse_sections(transcript)
     lines: list[str] = []
 
-    # ── Header ───────────────────────────────────────────────────────────────
+    # Header
     lines.append("=" * 60)
     lines.append("CHART NOTE — VoxChart Offline AI Dictation")
     lines.append(f"Date: {date_str}    Time: {time_str}")
-    if patient_name:
-        lines.append(f"Patient: {patient_name}")
-    if dob:
-        lines.append(f"DOB: {dob}")
-    if mrn:
-        lines.append(f"MRN: {mrn}")
+    if patient_name:  lines.append(f"Patient:      {patient_name}")
+    if dob:           lines.append(f"DOB:          {dob}")
+    if mrn:           lines.append(f"MRN:          {mrn}")
+    if encounter_id:  lines.append(f"Encounter ID: {encounter_id}")
+    if visit_type:    lines.append(f"Visit Type:   {visit_type}")
     lines.append("=" * 60)
     lines.append("")
 
-    # ── Sections ─────────────────────────────────────────────────────────────
-    section_order = [
-        "CHIEF COMPLAINT",
-        "HISTORY OF PRESENT ILLNESS",
-        "PHYSICAL EXAMINATION",
-        "ASSESSMENT",
-        "PLAN",
-        "ADDITIONAL NOTES",
-    ]
-
-    for section in section_order:
-        content = sections.get(section, [])
+    # Sections in canonical order
+    for section in SECTION_ORDER:
+        content = sections.get(section)
         if not content:
             continue
-        lines.append(f"{section}:")
-        lines.append("-" * len(section))
-        lines.append(" ".join(content))
-        lines.append("")
+        lines.append(format_section(section, content, smartphrase=smartphrase))
 
-    # ── Signature ────────────────────────────────────────────────────────────
+    # Signature
     lines.append("-" * 60)
     if provider_name:
         lines.append(f"Electronically signed by: {provider_name}")
@@ -188,7 +214,7 @@ def copy_to_clipboard(text: str) -> None:
     root.withdraw()
     root.clipboard_clear()
     root.clipboard_append(text)
-    root.update()   # keep clipboard alive
+    root.update()
     root.after(500, root.destroy)
     root.mainloop()
 
@@ -196,9 +222,9 @@ def copy_to_clipboard(text: str) -> None:
 def export_to_file(
     formatted: str,
     output_dir: str = "epic_exports",
-    filename: str | None = None,
+    filename: Optional[str] = None,
 ) -> Path:
-    """Save the formatted note to an epic_exports/ folder."""
+    """Save the formatted note to epic_exports/."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     if filename is None:
@@ -210,12 +236,82 @@ def export_to_file(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CLI entry point
+#  Export history log (SQLite)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_HISTORY_DB = Path("epic_exports") / "history.db"
+
+
+def _init_history_db() -> None:
+    Path("epic_exports").mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(_HISTORY_DB))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS export_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            exported_at TEXT    NOT NULL,
+            patient_name TEXT,
+            mrn         TEXT,
+            encounter_id TEXT,
+            method      TEXT,   -- 'clipboard' | 'file' | 'fhir'
+            file_path   TEXT,
+            note_preview TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def log_export(
+    patient_name: str = "",
+    mrn: str = "",
+    encounter_id: str = "",
+    method: str = "clipboard",
+    file_path: str = "",
+    note_preview: str = "",
+) -> None:
+    """Record an export event in the local history database."""
+    _init_history_db()
+    conn = sqlite3.connect(str(_HISTORY_DB))
+    conn.execute(
+        """
+        INSERT INTO export_log
+            (exported_at, patient_name, mrn, encounter_id, method, file_path, note_preview)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            datetime.now().isoformat(),
+            patient_name or "",
+            mrn or "",
+            encounter_id or "",
+            method,
+            file_path or "",
+            note_preview[:300] if note_preview else "",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_exports(limit: int = 50) -> list[dict]:
+    """Return recent export history records."""
+    _init_history_db()
+    conn = sqlite3.connect(str(_HISTORY_DB))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM export_log ORDER BY exported_at DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python epic_exporter.py <transcript_file.txt>")
+        print("Usage: python epic_exporter.py <transcript_file.txt> [--smartphrase]")
         sys.exit(1)
 
     src = Path(sys.argv[1])
@@ -223,10 +319,13 @@ if __name__ == "__main__":
         print(f"File not found: {src}")
         sys.exit(1)
 
+    use_sp = "--smartphrase" in sys.argv
     raw = src.read_text(encoding="utf-8")
-    formatted = format_for_epic(raw, provider_name="Dr. [Name]")
+    formatted = format_for_epic(raw, provider_name="Dr. [Name]", smartphrase=use_sp)
 
     saved = export_to_file(formatted)
+    log_export(method="file", file_path=str(saved), note_preview=formatted)
+
     print(f"\n✅ Epic note saved to: {saved}")
     print("\n" + "=" * 60)
     print(formatted)
