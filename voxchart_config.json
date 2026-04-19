@@ -2,6 +2,6 @@
   "first_run_complete": true,
   "device": "cuda",
   "compute_type": "float16",
-  "mic_index": 14,
-  "mic_name": "Microphone (Mic in at front panel (black))"
+  "mic_index": 9,
+  "mic_name": "Microphone Array (Intel\u00ae Smart Sound Technology for Digital Microphones)"
 }
